@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>HTMX + Gemini Chat</title>
+
+	<!-- HTMX -->
+	<script src="https://unpkg.com/htmx.org@1.9.10"></script>
+	<script src="https://unpkg.com/htmx.org@1.9.10/dist/ext/sse.js"></script>
+
+	<!-- Tailwind CSS -->
+	<script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+	<script>
+		tailwind.config = {
+			theme: {
+				extend: {
+					fontFamily: {
+						sans: ['Inter', 'sans-serif'],
+					},
+					colors: {
+						primary: '#2563eb', // Blue-600
+						secondary: '#f3f4f6', // Gray-100
+					}
+				}
+			}
+		}
+	</script>
+
+	<!-- Fonts -->
+	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+
+	<!-- Highlight.js -->
+	<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+	<style>
+		body {
+			font-family: 'Inter', sans-serif;
+		}
+
+		/* Custom scrollbar for Webkit */
+		::-webkit-scrollbar {
+			width: 8px;
+		}
+
+		::-webkit-scrollbar-track {
+			background: transparent;
+		}
+
+		::-webkit-scrollbar-thumb {
+			background: #cbd5e1;
+			border-radius: 4px;
+		}
+
+		::-webkit-scrollbar-thumb:hover {
+			background: #94a3b8;
+		}
+
+		/* Cursor blink animation */
+		@keyframes blink {
+			50% {
+				opacity: 0;
+			}
+		}
+
+		.cursor-blink {
+			animation: blink 1s infinite;
+		}
+	</style>
+</head>
+
+<body class="bg-gray-50 h-full flex flex-col items-center justify-center p-4 sm:p-6">
+
+	<div
+		class="w-full max-w-4xl bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col h-[85vh] border border-gray-100">
+
+		<!-- Header -->
+		<div class="bg-white border-b border-gray-100 p-4 flex justify-between items-center sticky top-0 z-10">
+			<div class="flex items-center gap-3">
+				<div
+					class="w-8 h-8 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center text-white font-bold text-sm">
+					AI
+				</div>
+				<h1 class="font-semibold text-gray-800 text-lg tracking-tight">Gemini Chat</h1>
+			</div>
+			<div class="flex items-center gap-2">
+				<button hx-get="/settings/system_instruction" hx-target="body" hx-swap="beforeend"
+					class="text-xs font-medium text-gray-500 hover:text-blue-600 transition-colors px-3 py-1.5 rounded-md hover:bg-blue-50 flex items-center gap-1">
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24"
+						stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+							d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+							d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+					</svg>
+					Settings
+				</button>
+				<button hx-post="/reset" hx-swap="none"
+					hx-on::after-request="document.getElementById('chat-window').innerHTML = ''"
+					class="text-xs font-medium text-gray-500 hover:text-red-500 transition-colors px-3 py-1.5 rounded-md hover:bg-red-50">
+					Clear History
+				</button>
+			</div>
+		</div>
+
+		<!-- Chat Window -->
+		<div id="chat-window" class="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
+			<!-- Messages will appear here -->
+			<div class="text-center text-gray-400 text-sm mt-10">
+				<p>Start a conversation with Gemini...</p>
+			</div>
+		</div>
+
+		<!-- Input Area -->
+		<div class="p-4 bg-white border-t border-gray-100">
+			<form hx-post="/chat" hx-target="#chat-window" hx-swap="beforeend scroll:bottom"
+				hx-on::after-request="this.reset()" class="relative flex items-center gap-2">
+
+				<input type="text" name="prompt" placeholder="Type your message..." required autocomplete="off"
+					class="w-full pl-4 pr-12 py-3.5 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-gray-700 placeholder-gray-400">
+
+				<button type="submit"
+					class="absolute right-2 p-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed group">
+					<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"
+						class="w-5 h-5 transform group-hover:translate-x-0.5 transition-transform">
+						<path
+							d="M3.105 2.289a.75.75 0 00-.826.95l1.414 4.925A1.5 1.5 0 005.135 9.25h6.115a.75.75 0 010 1.5H5.135a1.5 1.5 0 00-1.442 1.086l-1.414 4.926a.75.75 0 00.826.95 28.896 28.896 0 0015.293-7.154.75.75 0 000-1.115A28.897 28.897 0 003.105 2.289z" />
+					</svg>
+				</button>
+			</form>
+			<div class="text-center mt-2">
+				<p class="text-[10px] text-gray-400">Powered by Google Gemini • Built with HTMX & FastAPI</p>
+			</div>
+		</div>
+
+	</div>
+
+	<script>
+		// Listen for HTMX swaps to highlight code
+		document.body.addEventListener('htmx:afterSwap', function (evt) {
+			evt.detail.target.querySelectorAll('pre code').forEach((block) => {
+				hljs.highlightElement(block);
+			});
+
+			// Auto-scroll to bottom on new content
+			const chatWindow = document.getElementById('chat-window');
+			chatWindow.scrollTop = chatWindow.scrollHeight;
+		});
+	</script>
+</body>
+
+</html>
