@@ -14,15 +14,16 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 *   **Multimodal Support:**
     *   **Image Input:** Upload images to chat about them (uses Gemini Vision).
     *   **Image Output:** The bot can generate images using Pollinations.ai (just ask it to "generate an image").
+    *   **Chart/Graph Generation:** The bot can create data visualizations (pie charts, bar charts, line graphs, etc.) using matplotlib. Generated charts are automatically saved and displayed.
 *   **Web Search:** Integrated with **Tavily API** for real-time information retrieval.
-*   **Python Code Execution:** The bot can write and execute Python code for calculations and complex logic.
+*   **Python Code Execution:** The bot can write and execute Python code for calculations and complex logic. Supports all standard Python libraries including matplotlib, numpy, etc.
 *   **Date/Time Awareness:** The bot knows the current date and time.
 *   **Robust Error Handling:** Gracefully handles API quota limits and empty responses with automatic retries and user notifications.
 
 ## Prerequisites
 
 *   Python 3.9+
-*   A Google Cloud Project with the [Gemini API enabled](https://aistudio.google.com/).
+*   A [Gemini API Key](https://aistudio.google.com/).
 *   A [Tavily API Key](https://tavily.com/) for web search.
 
 ## Installation
@@ -45,7 +46,7 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
     Create a `requirements.txt` file (or run directly):
 
     ```bash
-    pip install fastapi uvicorn jinja2 python-dotenv google-generativeai markdown pillow python-multipart tavily-python
+    pip install fastapi uvicorn jinja2 python-dotenv google-generativeai markdown pillow python-multipart tavily-python geopy matplotlib numpy
     ```
 
 4.  **Configure Environment:**
@@ -67,7 +68,8 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 ├── chat.db                 # SQLite database for chat history
 ├── .gitignore              # Git ignore file
 ├── static/
-│   └── uploads/            # Directory for uploaded images
+│   ├── uploads/            # Directory for uploaded images
+│   └── generated/          # Directory for generated charts/plots
 └── templates/
     └── index.html          # Client UI (HTMX + Tailwind CSS + Highlight.js)
 ```
@@ -83,7 +85,8 @@ uvicorn main:app --reload
 *   **Access the UI:** Open `http://127.0.0.1:8000` in your browser.
 *   **Configure Persona:** Click the "Settings" button in the top right to change the AI's system instruction.
 *   **Upload Images:** Click the paperclip icon to upload an image.
-*   **Generate Images:** Ask "Generate an image of a cat".
+*   **Generate Images:** Ask "Generate an image of a cat" (artistic).
+*   **Generate Charts:** Ask "Generate a pie chart showing browser usage" (data visualization).
 *   **Search Web:** Ask "What is the price of Bitcoin?".
 *   **Run Code:** Ask "Calculate the 100th Fibonacci number".
 
