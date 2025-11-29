@@ -1,10 +1,18 @@
+# Environment and secrets
 .env
+
+# Python
 venv/
 __pycache__/
 *.pyc
-.DS_Store
-system_instruction.txt
 
+# OS
+.DS_Store
+
+# Application data (generated/user-specific)
+system_instruction.txt
 chat.db
+chat.db-shm
+chat.db-wal
 static/uploads/
 static/generated/

@@ -10,15 +10,20 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 *   **Real-Time Streaming:** Uses SSE to push LLM tokens to the browser instantly.
 *   **Modern UI:** Clean, responsive interface with distinct user/bot message styling and animations.
 *   **System Instructions:** Configure the AI's persona (e.g., "You are a pirate") via a built-in settings panel. Persists across sessions.
+*   **Model Selection:** Choose from multiple Gemini models (Flash, Pro, Flash Thinking) via the settings panel.
 *   **Persistent Chat History:** Uses SQLite (`chat.db`) to save conversations, allowing history to survive server restarts.
 *   **Multimodal Support:**
-    *   **Image Input:** Upload images to chat about them (uses Gemini Vision).
+    *   **File Input:** Upload any file type (PDFs, CSVs, text files, images, etc.) to analyze and ask questions about them.
     *   **Image Output:** The bot can generate images using Pollinations.ai (just ask it to "generate an image").
     *   **Chart/Graph Generation:** The bot can create data visualizations (pie charts, bar charts, line graphs, etc.) using matplotlib. Generated charts are automatically saved and displayed.
+*   **File Context Management:** 
+    *   When analyzing files, conversation history is temporarily cleared to ensure API compatibility.
+    *   Use the "Clear File Context" button to restore tools and conversation history after file analysis.
 *   **Web Search:** Integrated with **Tavily API** for real-time information retrieval.
 *   **Python Code Execution:** The bot can write and execute Python code for calculations and complex logic. Supports all standard Python libraries including matplotlib, numpy, etc.
 *   **Date/Time Awareness:** The bot knows the current date and time.
-*   **Robust Error Handling:** Gracefully handles API quota limits and empty responses with automatic retries and user notifications.
+*   **Location Services:** The bot can find coordinates for locations using geopy.
+*   **Robust Error Handling:** Gracefully handles API quota limits, token limits, and empty responses with automatic retries and user notifications.
 
 ## Prerequisites
 
@@ -84,11 +89,15 @@ uvicorn main:app --reload
 
 *   **Access the UI:** Open `http://127.0.0.1:8000` in your browser.
 *   **Configure Persona:** Click the "Settings" button in the top right to change the AI's system instruction.
-*   **Upload Images:** Click the paperclip icon to upload an image.
+*   **Select Model:** In the settings panel, choose your preferred Gemini model (Flash, Pro, or Flash Thinking).
+*   **Upload Files:** Click the paperclip icon to upload any file (images, PDFs, CSVs, text files, etc.).
+*   **Analyze Files:** After uploading, ask questions about the file content.
+*   **Clear File Context:** Click the "📎 Clear File Context" button to remove file references and restore tools/history.
 *   **Generate Images:** Ask "Generate an image of a cat" (artistic).
 *   **Generate Charts:** Ask "Generate a pie chart showing browser usage" (data visualization).
 *   **Search Web:** Ask "What is the price of Bitcoin?".
 *   **Run Code:** Ask "Calculate the 100th Fibonacci number".
+*   **Get Time/Date:** Ask "What time is it?" or "What's today's date?".
 
 ## Architecture Overview
 
@@ -117,4 +126,6 @@ uvicorn main:app --reload
 
 *   **Quota Exceeded:** If you see a red "Quota Exceeded" error, wait a minute and try again. The app handles this gracefully.
 *   **No Search Results:** Ensure `TAVILY_API_KEY` is set in `.env`.
-*   **Image Upload Fails:** Ensure `static/uploads/` directory exists (created automatically).
+*   **File Upload Fails:** Ensure `static/uploads/` directory exists (created automatically).
+*   **Tools Not Working After File Upload:** When a file is in context, tools are automatically disabled. Click "📎 Clear File Context" to re-enable them.
+*   **Lost Conversation History:** File analysis temporarily clears history for API compatibility. Use "Clear File Context" to restore history when done analyzing files.

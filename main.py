@@ -70,9 +70,35 @@ templates = Jinja2Templates(directory="templates")
 
 # --- 2. DATABASE & SESSION MANAGEMENT ---
 DB_NAME = "chat.db"
+DB_TIMEOUT = 60.0  # Increased timeout for database operations
+
+# Retry decorator for database operations
+def retry_on_db_lock(max_retries=5, delay=0.1):
+    """Decorator to retry database operations if they fail due to locking."""
+    def decorator(func):
+        import functools
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            import time
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e) and attempt < max_retries - 1:
+                        print(f"Database locked in {func.__name__}, retrying ({attempt + 1}/{max_retries})...")
+                        time.sleep(delay * (attempt + 1))  # Exponential backoff
+                    else:
+                        raise
+            return None
+        return wrapper
+    return decorator
 
 def init_db():
-    with sqlite3.connect(DB_NAME) as conn:
+    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+        # Enable WAL mode for better concurrency
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
+        
         conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -93,73 +119,107 @@ def init_db():
             conn.execute("ALTER TABLE messages ADD COLUMN mime_type TEXT")
         except sqlite3.OperationalError:
             pass # Column likely exists
+        try:
+            conn.execute("ALTER TABLE messages ADD COLUMN gemini_uri TEXT")
+        except sqlite3.OperationalError:
+            pass # Column likely exists
+        
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS generated_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        print("Database initialized with WAL mode enabled")
 
 # Initialize DB on startup
 init_db()
 
+@retry_on_db_lock()
 def get_history(session_id: str) -> List[Dict[str, str]]:
     """Retrieves history for a specific session ID from DB."""
-    with sqlite3.connect(DB_NAME) as conn:
+    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
         conn.row_factory = sqlite3.Row
+        # Select gemini_uri too
         cursor = conn.execute(
-            "SELECT role, content, image_path FROM messages WHERE session_id = ? ORDER BY id ASC", 
+            "SELECT role, content, image_path, gemini_uri FROM messages WHERE session_id = ? ORDER BY id ASC", 
             (session_id,)
         )
         rows = cursor.fetchall()
-        # Convert to format expected by Gemini and our logic
-        history = []
-        for row in rows:
-            content = row["content"]
-            role = row["role"]
-            parts = []
-            
-            # Check if content is JSON (for tool calls/responses)
-            if content.strip().startswith("{"):
-                try:
-                    data = json.loads(content)
-                    if "function_call" in data:
-                        # Reconstruct FunctionCall part
-                        fc_data = data["function_call"]
-                        parts.append(
-                            genai.protos.Part(
-                                function_call=genai.protos.FunctionCall(
-                                    name=fc_data["name"],
-                                    args=fc_data["args"]
-                                )
+
+    history = []
+    for row in rows:
+        role = row["role"]
+        content = row["content"]
+        parts = []
+        
+        # Check if content is JSON (for tool calls/responses)
+        if content.strip().startswith("{"):
+            try:
+                data = json.loads(content)
+                if "function_call" in data:
+                    # Reconstruct FunctionCall part
+                    fc_data = data["function_call"]
+                    parts.append(
+                        genai.protos.Part(
+                            function_call=genai.protos.FunctionCall(
+                                name=fc_data["name"],
+                                args=fc_data["args"]
                             )
                         )
-                    elif "function_response" in data:
-                        # Reconstruct FunctionResponse part
-                        fr_data = data["function_response"]
-                        parts.append(
-                            genai.protos.Part(
-                                function_response=genai.protos.FunctionResponse(
-                                    name=fr_data["name"],
-                                    response=fr_data["response"]
-                                )
+                    )
+                elif "function_response" in data:
+                    # Reconstruct FunctionResponse part
+                    fr_data = data["function_response"]
+                    parts.append(
+                        genai.protos.Part(
+                            function_response=genai.protos.FunctionResponse(
+                                name=fr_data["name"],
+                                response=fr_data["response"]
                             )
                         )
-                    else:
-                        # Fallback for other JSON or plain text
-                        parts.append(content)
-                except json.JSONDecodeError:
+                    )
+                else:
+                    # Fallback for other JSON or plain text
                     parts.append(content)
-            else:
+            except json.JSONDecodeError:
                 parts.append(content)
+        else:
+            parts.append(content)
 
-            # Note: We are currently NOT loading historical images into the context for Gemini to save tokens/bandwidth
-            # and because multi-turn image chat can be complex. 
-            # If needed, we could load the image here using PIL.
-            history.append({"role": role, "parts": parts})
-        return history
+        # Add image if present
+        image_path = row["image_path"]
+        # Check if gemini_uri exists in keys (for safety during migration)
+        gemini_uri = row["gemini_uri"] if "gemini_uri" in row.keys() else None
+        mime_type = row["mime_type"] if "mime_type" in row.keys() else "image/jpeg" # Default fallback
+        
+        if gemini_uri:
+            # Use genai.protos.Part with FileData
+            parts.append(
+                genai.protos.Part(
+                    file_data=genai.protos.FileData(
+                        mime_type=mime_type,
+                        file_uri=gemini_uri
+                    )
+                )
+            )
+        elif image_path:
+            # Fallback: We have a local path but no URI. 
+            pass
 
-def save_message(session_id: str, role: str, content: str, image_path: Optional[str] = None, mime_type: Optional[str] = None):
-    with sqlite3.connect(DB_NAME) as conn:
+        history.append({"role": role, "parts": parts})
+    return history
+
+@retry_on_db_lock()
+def save_message(session_id: str, role: str, content: str, image_path: Optional[str] = None, mime_type: Optional[str] = None, gemini_uri: Optional[str] = None):
+    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
         conn.execute(
-            "INSERT INTO messages (session_id, role, content, image_path, mime_type) VALUES (?, ?, ?, ?, ?)",
-            (session_id, role, content, image_path, mime_type)
+            "INSERT INTO messages (session_id, role, content, image_path, mime_type, gemini_uri) VALUES (?, ?, ?, ?, ?, ?)",
+            (session_id, role, content, image_path, mime_type, gemini_uri)
         )
-
 # Helper to render messages (DRY)
 def render_user_message(content: str, image_path: Optional[str] = None) -> str:
     image_html = ""
@@ -256,7 +316,7 @@ def search_web(query: str):
     except Exception as e:
         return f"Error performing search: {str(e)}"
 
-def execute_python(code: str):
+def execute_python(code: str, session_id: Optional[str] = None):
     """
     Executes the given Python code and returns the standard output.
     Use this tool for calculations, data processing, or logic that requires code execution.
@@ -301,6 +361,17 @@ def execute_python(code: str):
                 os.rename(src, dst)
                 generated_images.append(f"/{dst}")
                 print(f"Captured generated image: {dst}")
+                
+                # Track in DB if session_id is provided
+                if session_id:
+                    try:
+                        with sqlite3.connect(DB_NAME) as conn:
+                            conn.execute(
+                                "INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)",
+                                (session_id, dst)
+                            )
+                    except Exception as e:
+                        print(f"Error tracking generated file in DB: {e}")
         
         # Append image links to output
         if generated_images:
@@ -361,7 +432,7 @@ async def get_home(request: Request, response: Response):
     # Let's update get_history to return the raw row data or handle rendering there?
     # Better: Let's just query DB here for rendering to keep get_history clean for Gemini.
     
-    with sqlite3.connect(DB_NAME) as conn:
+    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
             "SELECT role, content, image_path FROM messages WHERE session_id = ? ORDER BY id ASC", 
@@ -439,11 +510,12 @@ async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile 
     return user_message_html + bot_placeholder_html
 
 @app.get("/stream")
-async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id: str = Query(...), image_path: Optional[str] = None, mime_type: Optional[str] = None):
+async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id: str = Query(...), image_path: Optional[str] = None, mime_type: Optional[str] = None, selected_model: str = Cookie("gemini-2.5-flash")):
     """
     The 'session_id' is automatically extracted from the browser cookie.
     """
     async def event_generator():
+        error_div = '<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Error:</strong> An unexpected error occurred. Please try again.</div>'
         try:
             # If no session cookie, we can't track history.
             if not session_id:
@@ -484,6 +556,25 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
                     current_parts.append(uploaded_file)
                     print(f"File uploaded successfully: {uploaded_file.uri}")
                     
+                    # Update the message in DB with the Gemini URI for future context
+                    # We need to find the message ID. Since we don't have it easily (it was just inserted),
+                    # we can update by session_id and image_path (assuming unique enough for this flow)
+                    # or better: update the LAST message for this session that has this image_path
+                    if session_id:
+                        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                            conn.execute(
+                                """
+                                UPDATE messages 
+                                SET gemini_uri = ? 
+                                WHERE id = (
+                                    SELECT id FROM messages 
+                                    WHERE session_id = ? AND image_path = ? 
+                                    ORDER BY id DESC LIMIT 1
+                                )
+                                """,
+                                (uploaded_file.uri, session_id, image_path)
+                            )
+                    
                 except Exception as e:
                     print(f"Error uploading file: {e}")
                     yield format_sse(f"<div><strong>Error:</strong> Failed to upload file to AI: {str(e)}</div>")
@@ -507,23 +598,52 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
             
             # Define tools
             tools = []
-            if tavily_client:
-                tools.append(search_web)
-                current_instruction += "\n\nYou have access to a 'search_web' tool. Use it whenever the user asks for current information, news, or facts you don't know. Do NOT invent new tools. Only use 'search_web' for searching."
             
-            tools.append(execute_python)
-            current_instruction += "\n\nYou have access to an 'execute_python' tool. Use it for calculations, math, or complex logic. It is allowed to import any Python module (including matplotlib). The code MUST print the result to stdout. If you generate plots or images, save them to the current directory (e.g. 'plot.png'). The tool will capture them and provide a markdown link (e.g. `![Generated Image](/static/generated/...)`). You MUST include this markdown link in your final response to the user."
+            # Check if ANY file exists in the conversation (history + current request)
+            has_file_in_context = False
+            
+            # 1. Check current request
+            if image_path:
+                has_file_in_context = True
+            
+            # 2. Check history if not already found
+            if not has_file_in_context:
+                for msg in messages_payload:
+                    for part in msg.get('parts', []):
+                        if hasattr(part, 'file_data') and part.file_data:
+                            has_file_in_context = True
+                            break
+                    if has_file_in_context:
+                        break
 
-            tools.append(get_current_datetime)
-            current_instruction += "\n\nYou have access to a 'get_current_datetime' tool. Use it when asked about the current time or date."
+            # Only add tools if NO file is present (Gemini API limitation)
+            if not has_file_in_context:
+                if tavily_client:
+                    tools.append(search_web)
+                    current_instruction += "\n\nYou have access to a 'search_web' tool. Use it whenever the user asks for current information, news, or facts you don't know. Do NOT invent new tools. Only use 'search_web' for searching."
+                
+                tools.append(execute_python)
+                current_instruction += "\n\nYou have access to an 'execute_python' tool. Use it for calculations, math, or complex logic. It is allowed to import any Python module (including matplotlib). The code MUST print the result to stdout. If you generate plots or images, save them to the current directory (e.g. 'plot.png'). The tool will capture them and provide a markdown link (e.g. `![Generated Image](/static/generated/...)`). You MUST include this markdown link in your final response to the user."
 
-            tools.append(get_coordinates)
-            current_instruction += "\n\nYou have access to a 'get_coordinates' tool. Use it to find the latitude and longitude of locations."
+                tools.append(get_current_datetime)
+                current_instruction += "\n\nYou have access to a 'get_current_datetime' tool. Use it when asked about the current time or date."
+
+                tools.append(get_coordinates)
+                current_instruction += "\n\nYou have access to a 'get_coordinates' tool. Use it to find the latitude and longitude of locations."
+            else:
+                # SIMPLIFIED APPROACH: When files are present, clear history to avoid API compatibility issues
+                # Keep only the current message (last one in payload)
+                print("Tools disabled due to file context. Clearing history to avoid API errors.")
+                if messages_payload:
+                    current_msg = messages_payload[-1]  # Keep only the current message
+                    messages_payload = [current_msg]
+                
+                current_instruction += "\n\nNote: Tool calling is disabled because you are analyzing an uploaded file. Focus on the file content."
 
             model = genai.GenerativeModel(
-                model_name='gemini-2.5-flash',
+                model_name=selected_model,
                 system_instruction=current_instruction,
-                tools=tools
+                tools=tools if tools else None
             )
             
             # We need to handle potential function calls in a loop
@@ -565,8 +685,28 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
                         yield format_sse(f'<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Quota Exceeded:</strong> You have hit the API rate limit. Please wait a moment and try again.</div>')
                         return # Stop processing immediately
                     except Exception as e:
+                        error_str = str(e)
+                        
+                        # Check for token limit errors (don't retry)
+                        if "token count exceeds" in error_str.lower() or "maximum number of tokens" in error_str.lower():
+                            print(f"Token limit exceeded: {e}")
+                            yield format_sse(f'<div class="bg-orange-50 border border-orange-200 text-orange-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Token Limit Exceeded:</strong> The input (including file content and chat history) is too large. The maximum allowed is 1,048,576 tokens. Please try with a smaller file or clear your chat history.</div>')
+                            return # Stop processing immediately
+                        
+                        # Check for invalid argument errors (don't retry)
+                        if "400" in error_str and "invalid argument" in error_str.lower():
+                            print(f"Invalid argument error: {e}")
+                            yield format_sse(f'<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Invalid Request:</strong> The file or request format is not supported. Please try a different file or check that the file is not corrupted.</div>')
+                            return # Stop processing immediately
+                        
+                        # Check for 403 Forbidden (File permission/expiration)
+                        if "403" in error_str or "permission to access" in error_str.lower():
+                            print(f"Permission denied (expired file?): {e}")
+                            yield format_sse(f'<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Access Denied:</strong> A file in your conversation history is no longer accessible (it may have expired). Please <button hx-post="/reset" hx-target="#chat-messages" hx-swap="innerHTML" class="underline font-bold hover:text-red-800">Reset Chat</button> to continue.</div>')
+                            return # Stop processing immediately
+
                         # Check for 429 in string representation just in case
-                        if "429" in str(e) or "quota" in str(e).lower():
+                        if "429" in error_str or "quota" in error_str.lower():
                             print(f"Quota exceeded (detected via string): {e}")
                             yield format_sse(f'<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Quota Exceeded:</strong> You have hit the API rate limit. Please wait a moment and try again.</div>')
                             return # Stop processing immediately
@@ -605,7 +745,8 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
                         if fn_name == "search_web":
                             api_response = search_web(fn_args.get("query"))
                         elif fn_name == "execute_python":
-                            api_response = execute_python(fn_args.get("code"))
+                            # Pass session_id for file tracking
+                            api_response = execute_python(fn_args.get("code"), session_id=session_id)
                         elif fn_name == "get_current_datetime":
                             api_response = get_current_datetime()
                         elif fn_name == "get_coordinates":
@@ -682,19 +823,99 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
             yield format_sse("", event="close")
 
         except Exception as e:
+            print(f"CRITICAL ERROR in stream_response: {e}")
+            traceback.print_exc()
             yield format_sse(error_div)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.post("/reset")
-async def reset_chat(session_id: str = Cookie(None)):
+@retry_on_db_lock()
+def reset_chat(session_id: str = Cookie(None)):
+    image_paths = []
     if session_id:
-        with sqlite3.connect(DB_NAME) as conn:
+        # Separate connection scope - commit and close immediately
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            # Get all image paths for this session before deleting
+            cursor = conn.execute(
+                "SELECT image_path FROM messages WHERE session_id = ? AND image_path IS NOT NULL", 
+                (session_id,)
+            )
+            image_paths = [row["image_path"] for row in cursor.fetchall()]
+            
+            # Delete messages from database
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            conn.commit()  # Explicit commit to release lock immediately
+        # Connection is now closed, lock released
+        
+        # Delete associated files AFTER database is unlocked
+        for image_path in image_paths:
+            # image_path is like "/static/uploads/filename.ext"
+            # Convert to filesystem path
+            file_path = image_path.lstrip("/")
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                    print(f"Deleted file: {file_path}")
+                except Exception as e:
+                    print(f"Error deleting file {file_path}: {e}")
+        
+        # Clean up generated files for this session
+        try:
+            # Open NEW connection for generated files (previous conn is closed)
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as gen_conn:
+                gen_conn.row_factory = sqlite3.Row
+                # Get generated files for this session
+                cursor = gen_conn.execute(
+                    "SELECT file_path FROM generated_files WHERE session_id = ?", 
+                    (session_id,)
+                )
+                generated_files = [row["file_path"] for row in cursor.fetchall()]
+            
+            for file_path in generated_files:
+                # file_path is like "/static/generated/..."
+                # Convert to filesystem path
+                fs_path = file_path.lstrip("/")
+                if os.path.exists(fs_path):
+                    try:
+                        os.remove(fs_path)
+                        print(f"Deleted generated file: {fs_path}")
+                    except Exception as e:
+                        print(f"Error deleting generated file {fs_path}: {e}")
+            
+            # Delete records from DB
+            gen_conn.execute("DELETE FROM generated_files WHERE session_id = ?", (session_id,))
+            gen_conn.commit()
+            
+        except Exception as e:
+            print(f"Error cleaning generated files: {e}")
+    
     return ""
 
+@app.post("/clear-file-context")
+def clear_file_context(session_id: str = Cookie(None)):
+    """Remove all file references from the conversation history."""
+    if session_id:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            # Clear gemini_uri for all messages in this session
+            conn.execute(
+                "UPDATE messages SET gemini_uri = NULL WHERE session_id = ?",
+                (session_id,)
+            )
+            conn.commit()
+        
+        return HTMLResponse(
+            '<div class="text-xs text-green-600 mb-2 flex items-center gap-1">'
+            '<svg class="w-3 h-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>'
+            '✅ File context cleared. Tools re-enabled!'
+            '</div>'
+        )
+    return HTMLResponse("")
+
+
 @app.get("/settings/system_instruction", response_class=HTMLResponse)
-async def get_system_instruction_ui():
+async def get_system_instruction_ui(selected_model: str = Cookie("gemini-2.5-flash")):
     instruction = get_system_instruction()
     return f"""
     <div class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in" id="settings-modal">
@@ -715,6 +936,18 @@ async def get_system_instruction_ui():
                               placeholder="e.g., You are a helpful assistant...">{instruction}</textarea>
                     <p class="text-xs text-gray-500 mt-2">This instruction will be applied to all new messages.</p>
                 </div>
+                
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">Model Selection</label>
+                    <select name="model" 
+                            class="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm">
+                        <option value="gemini-2.5-flash" {'selected' if selected_model == 'gemini-2.5-flash' else ''}>Gemini 2.5 Flash (Fastest)</option>
+                        <option value="gemini-2.5-flash-lite" {'selected' if selected_model == 'gemini-2.5-flash-lite' else ''}>Gemini 2.5 Flash Lite</option>
+                        <option value="gemini-2.5-flash-tts" {'selected' if selected_model == 'gemini-2.5-flash-tts' else ''}>Gemini 2.5 Flash TTS</option>
+                        <option value="gemini-2.5-pro" {'selected' if selected_model == 'gemini-2.5-pro' else ''}>Gemini 2.5 Pro (Balanced)</option>
+                        <option value="gemini-3-pro" {'selected' if selected_model == 'gemini-3-pro' else ''}>Gemini 3 Pro (Most Capable)</option>
+                    </select>
+                </div>
             </div>
             <div class="p-6 border-t border-gray-100 bg-gray-50 flex justify-end gap-3">
                 <button onclick="document.getElementById('settings-modal').remove()" 
@@ -722,7 +955,7 @@ async def get_system_instruction_ui():
                     Cancel
                 </button>
                 <button hx-post="/settings/system_instruction" 
-                        hx-include="[name='instruction']"
+                        hx-include="[name='instruction'], [name='model']"
                         hx-target="#settings-modal"
                         hx-swap="outerHTML"
                         class="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-colors">
@@ -734,10 +967,9 @@ async def get_system_instruction_ui():
     """
 
 @app.post("/settings/system_instruction", response_class=HTMLResponse)
-async def post_system_instruction(instruction: str = Form(...)):
+async def post_system_instruction(instruction: str = Form(...), model: str = Form(...)):
     save_system_instruction(instruction)
-    # Return a success notification or close the modal
-    return """
+    response = Response(content="""
     <div id="settings-modal" class="fixed inset-0 z-50 flex items-end justify-center p-4 pointer-events-none">
         <div class="bg-green-50 text-green-700 border border-green-200 px-6 py-4 rounded-xl shadow-lg flex items-center gap-3 animate-fade-in-up pointer-events-auto">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -755,4 +987,6 @@ async def post_system_instruction(instruction: str = Form(...)):
             </script>
         </div>
     </div>
-    """
+    """)
+    response.set_cookie(key="selected_model", value=model)
+    return response
