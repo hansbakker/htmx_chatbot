@@ -9,20 +9,23 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 *   **Zero-Build Frontend:** No Webpack, no node_modules, no hydration. Uses Tailwind CSS via CDN.
 *   **Real-Time Streaming:** Uses SSE to push LLM tokens to the browser instantly.
 *   **Modern UI:** Clean, responsive interface with distinct user/bot message styling and animations.
+*   **Smart Scroll Behavior:** Intelligently positions user queries at the top while showing as much of the response as possible.
 *   **System Instructions:** Configure the AI's persona (e.g., "You are a pirate") via a built-in settings panel. Persists across sessions.
 *   **Model Selection:** Choose from multiple Gemini models (Flash, Pro, Flash Thinking) via the settings panel.
 *   **Persistent Chat History:** Uses SQLite (`chat.db`) to save conversations, allowing history to survive server restarts.
 *   **Multimodal Support:**
     *   **File Input:** Upload any file type (PDFs, CSVs, text files, images, etc.) to analyze and ask questions about them.
-    *   **Image Output:** The bot can generate images using Pollinations.ai (just ask it to "generate an image").
-    *   **Chart/Graph Generation:** The bot can create data visualizations (pie charts, bar charts, line graphs, etc.) using matplotlib. Generated charts are automatically saved and displayed.
+    *   **Image Generation:** Generate artistic images using Pollinations.ai via the `generate_image` tool.
+    *   **Chart/Graph Generation:** Create data visualizations (bar charts, line graphs, scatter plots, etc.) using matplotlib via the `generate_chart` tool.
 *   **File Context Management:** 
     *   When analyzing files, conversation history is temporarily cleared to ensure API compatibility.
     *   Use the "Clear File Context" button to restore tools and conversation history after file analysis.
-*   **Web Search:** Integrated with **Tavily API** for real-time information retrieval.
-*   **Python Code Execution:** The bot can write and execute Python code for calculations and complex logic. Supports all standard Python libraries including matplotlib, numpy, etc.
-*   **Date/Time Awareness:** The bot knows the current date and time.
-*   **Location Services:** The bot can find coordinates for locations using geopy.
+*   **Intelligent Tools:**
+    *   **Web Search:** Integrated with **Tavily API** for real-time information retrieval.
+    *   **Python Execution:** Separate tools for calculations (`execute_calculation`) and visualizations (`generate_chart`).
+    *   **Timezone Awareness:** Automatically detects user timezone from IP address, with manual override support.
+    *   **Date/Time:** Get current time in user's timezone or any specified timezone.
+    *   **Location Services:** Find coordinates for locations using geopy.
 *   **Robust Error Handling:** Gracefully handles API quota limits, token limits, and empty responses with automatic retries and user notifications.
 
 ## Prerequisites
@@ -44,14 +47,14 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 
     ```bash
     python -m venv venv
-    source venv/bin/activate  # On Windows: venv\Scripts\activate
+    source venv/bin/activate  # On Windows: venv\\Scripts\\activate
     ```
 
 3.  **Install dependencies:**
     Create a `requirements.txt` file (or run directly):
 
     ```bash
-    pip install fastapi uvicorn jinja2 python-dotenv google-generativeai markdown pillow python-multipart tavily-python geopy matplotlib numpy
+    pip install fastapi uvicorn jinja2 python-dotenv google-generativeai markdown pillow python-multipart tavily-python geopy matplotlib numpy pandas requests
     ```
 
 4.  **Configure Environment:**
@@ -73,8 +76,8 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 ├── chat.db                 # SQLite database for chat history
 ├── .gitignore              # Git ignore file
 ├── static/
-│   ├── uploads/            # Directory for uploaded images
-│   └── generated/          # Directory for generated charts/plots
+│   ├── uploads/            # Directory for uploaded files
+│   └── generated/          # Directory for generated charts/images
 └── templates/
     └── index.html          # Client UI (HTMX + Tailwind CSS + Highlight.js)
 ```
@@ -93,11 +96,12 @@ uvicorn main:app --reload
 *   **Upload Files:** Click the paperclip icon to upload any file (images, PDFs, CSVs, text files, etc.).
 *   **Analyze Files:** After uploading, ask questions about the file content.
 *   **Clear File Context:** Click the "📎 Clear File Context" button to remove file references and restore tools/history.
-*   **Generate Images:** Ask "Generate an image of a cat" (artistic).
-*   **Generate Charts:** Ask "Generate a pie chart showing browser usage" (data visualization).
+*   **Generate Images:** Ask "Draw a cat wearing a wizard hat" (artistic images via Pollinations.ai).
+*   **Generate Charts:** Ask "Create a bar chart showing Q1=100, Q2=150, Q3=120, Q4=180" (data visualization via matplotlib).
 *   **Search Web:** Ask "What is the price of Bitcoin?".
-*   **Run Code:** Ask "Calculate the 100th Fibonacci number".
-*   **Get Time/Date:** Ask "What time is it?" or "What's today's date?".
+*   **Run Calculations:** Ask "Calculate the 100th Fibonacci number".
+*   **Get Time/Date:** Ask "What time is it?" (automatically detects your timezone) or "What time is it in Tokyo?".
+*   **Get Timezone:** Ask "What is my timezone?".
 
 ## Architecture Overview
 
@@ -107,20 +111,33 @@ uvicorn main:app --reload
     *   Server loads chat history from `chat.db`.
 
 2.  **User Submission:**
-    *   HTMX sends a `POST /chat` (multipart/form-data for images).
+    *   HTMX sends a `POST /chat` (multipart/form-data for files).
     *   Server saves user message to DB.
-    *   Server returns HTML immediately containing the User Message and a **Bot Placeholder** (`<div sse-connect="...">`).
+    *   Server returns HTML immediately containing the User Message and a **Bot Placeholder** (`<div sse-connect="...">`)`.
 
 3.  **Streaming (SSE) & Tools:**
     *   Browser connects to the `/stream` endpoint.
-    *   Server initializes Gemini with tools (`search_web`, `execute_python`, `get_current_datetime`).
-    *   **Function Calling:** If the model calls a tool, the server executes it (e.g., runs Python code), feeds the result back to the model, and streams the final answer.
+    *   Server initializes Gemini with tools (`search_web`, `execute_calculation`, `generate_chart`, `generate_image`, `get_current_datetime`, `get_user_timezone`, `get_coordinates`).
+    *   **Function Calling:** If the model calls a tool, the server executes it (e.g., generates a chart, searches the web), feeds the result back to the model, and streams the final answer.
+    *   **Timezone Detection:** Client IP is captured and used for automatic timezone detection in datetime queries.
     *   **Retries:** Automatic retries for empty responses or transient errors.
     *   **Formatting:** Server converts Markdown to HTML on the fly.
 
 4.  **Completion (OOB Swap):**
     *   Upon stream completion, the server saves the bot's response to DB.
     *   Server sends a final `hx-swap-oob="outerHTML"` event to finalize the UI.
+
+## Available Tools
+
+The chatbot has access to the following tools:
+
+*   **`search_web(query)`** - Search the web for current information using Tavily API
+*   **`execute_calculation(code)`** - Execute Python code for calculations and data processing (text output only)
+*   **`generate_chart(code)`** - Generate data visualizations using matplotlib (returns image)
+*   **`generate_image(description)`** - Generate artistic images using Pollinations.ai (returns image)
+*   **`get_current_datetime(timezone?)`** - Get current date/time with automatic timezone detection or manual override
+*   **`get_user_timezone()`** - Get user's timezone based on IP address
+*   **`get_coordinates(location)`** - Get latitude/longitude for a location using geopy
 
 ## Troubleshooting
 
@@ -129,3 +146,4 @@ uvicorn main:app --reload
 *   **File Upload Fails:** Ensure `static/uploads/` directory exists (created automatically).
 *   **Tools Not Working After File Upload:** When a file is in context, tools are automatically disabled. Click "📎 Clear File Context" to re-enable them.
 *   **Lost Conversation History:** File analysis temporarily clears history for API compatibility. Use "Clear File Context" to restore history when done analyzing files.
+*   **Timezone Not Detected:** For localhost (127.0.0.1), timezone detection defaults to UTC. Deploy to a server with a public IP for automatic detection.

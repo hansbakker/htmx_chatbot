@@ -265,6 +265,52 @@
 			document.getElementById('file-preview').classList.add('hidden');
 			document.getElementById('preview-img').src = '';
 		}
+
+		// Smart scroll behavior
+		function smartScroll() {
+			const chatWindow = document.getElementById('chat-window');
+			const messages = chatWindow.querySelectorAll('.mb-4');
+
+			if (messages.length < 2) {
+				// If only one message, just scroll to bottom
+				chatWindow.scrollTop = chatWindow.scrollHeight;
+				return;
+			}
+
+			// Get the last two messages (user query + bot response)
+			const userMessage = messages[messages.length - 2];
+			const botMessage = messages[messages.length - 1];
+
+			// Get viewport height
+			const viewportHeight = chatWindow.clientHeight;
+
+			// Calculate total height of last two messages
+			const userMessageHeight = userMessage.offsetHeight;
+			const botMessageHeight = botMessage.offsetHeight;
+			const totalHeight = userMessageHeight + botMessageHeight;
+
+			// If both messages fit in viewport, scroll to show both completely
+			if (totalHeight <= viewportHeight) {
+				userMessage.scrollIntoView({ behavior: 'smooth', block: 'start' });
+			} else {
+				// If they don't fit, position user message at top and show as much of bot message as possible
+				// Scroll to user message top, which will show the beginning of bot message below
+				userMessage.scrollIntoView({ behavior: 'smooth', block: 'start' });
+			}
+		}
+
+		// Call smart scroll after HTMX swaps content
+		document.body.addEventListener('htmx:afterSwap', function (evt) {
+			// Only trigger on chat messages, not on other swaps
+			if (evt.detail.target.id === 'chat-window') {
+				setTimeout(smartScroll, 100); // Small delay to ensure content is rendered
+			}
+		});
+
+		// Also call on SSE message updates
+		document.body.addEventListener('htmx:sseMessage', function (evt) {
+			setTimeout(smartScroll, 100);
+		});
 	</script>
 </body>
 

@@ -6,8 +6,22 @@ import markdown
 import io
 import sys
 import traceback
+import contextlib
 import datetime
+import shutil
+import contextvars
+import urllib.request
+import json
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    # Fallback for older Python versions if needed, though 3.9+ is expected
+    ZoneInfo = None
+
 from collections import deque
+
+# Context variable to store client IP
+client_ip_ctx = contextvars.ContextVar("client_ip", default=None)
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Form, Response, Cookie, File, UploadFile, Query
@@ -34,8 +48,14 @@ genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 try:
     import matplotlib
     matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
 except ImportError:
-    pass # Matplotlib might not be installed yet, which is fine for basic usage
+    plt = None
+    np = None
+    pd = None
+    print("Warning: matplotlib, numpy, or pandas not installed. Chart generation will be unavailable.")
 
 # Configure Tavily
 tavily_client = None
@@ -57,13 +77,6 @@ def save_system_instruction(instruction: str):
     with open(SYSTEM_INSTRUCTION_FILE, "w") as f:
         f.write(instruction)
 
-IMAGE_GEN_INSTRUCTION = """
-You can generate artistic or creative images by using the following markdown format:
-![Image Description](https://image.pollinations.ai/prompt/{description}?width=1024&height=1024&nologo=true)
-IMPORTANT: Use this ONLY for artistic requests (e.g. "draw a cat").
-For data visualizations, charts, graphs, or plots, you MUST use the `execute_python` tool with matplotlib.
-"""
-
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
@@ -71,6 +84,7 @@ templates = Jinja2Templates(directory="templates")
 # --- 2. DATABASE & SESSION MANAGEMENT ---
 DB_NAME = "chat.db"
 DB_TIMEOUT = 60.0  # Increased timeout for database operations
+GENERATED_DIR = "static/generated"  # Directory for generated charts/images
 
 # Retry decorator for database operations
 def retry_on_db_lock(max_retries=5, delay=0.1):
@@ -316,83 +330,200 @@ def search_web(query: str):
     except Exception as e:
         return f"Error performing search: {str(e)}"
 
-def execute_python(code: str, session_id: Optional[str] = None):
+
+    
+# Tool Definitions
+
+def execute_calculation(code: str):
     """
-    Executes the given Python code and returns the standard output.
-    Use this tool for calculations, data processing, or logic that requires code execution.
-    The code must print the final result to stdout.
-    If the code generates an image (e.g. using matplotlib), save it to the current directory.
+    Executes Python code for calculations, logic, and text processing.
+    Use this for math, data analysis, or string manipulation.
+    
+    IMPORTANT:
+    - This tool does NOT support plotting or image generation. Use 'generate_chart' for that.
+    - The code must print the final result to stdout using `print()`.
+    - You can import standard libraries (math, datetime, json, etc.) and numpy/pandas.
     """
-    print(f"Executing Python code:\n{code}")
-    
-    # Create a string buffer to capture stdout
-    old_stdout = sys.stdout
-    redirected_output = io.StringIO()
-    sys.stdout = redirected_output
-    
-    # Ensure generated directory exists
-    generated_dir = "static/generated"
-    os.makedirs(generated_dir, exist_ok=True)
-    
-    # Snapshot current directory files to detect new ones
-    # We only look for images in the current working directory (root)
-    cwd_files_before = set(os.listdir('.'))
+    # Create a captured output stream
+    output_capture = io.StringIO()
     
     try:
-        # Execute the code
-        exec_globals = {}
-        exec(code, exec_globals)
-        
-        # Get the output
-        output = redirected_output.getvalue()
-        if not output:
-            output = "Code executed successfully (no output)."
+        # Redirect stdout to capture print statements
+        with contextlib.redirect_stdout(output_capture):
+            # Execute the code in a restricted global scope
+            # We allow numpy and pandas for data analysis
+            exec(code, {'__builtins__': __builtins__, 'np': np, 'pd': pd, 'plt': plt})
             
-        # Check for new files
-        cwd_files_after = set(os.listdir('.'))
-        new_files = cwd_files_after - cwd_files_before
+        result = output_capture.getvalue()
+        if not result:
+            return "Code executed successfully but printed no output. Did you forget to print the result?"
+        return result.strip()
         
-        generated_images = []
-        for filename in new_files:
-            if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.svg')):
-                # Move to static/generated
-                src = filename
-                dst = f"{generated_dir}/{uuid.uuid4()}_{filename}"
-                os.rename(src, dst)
-                generated_images.append(f"/{dst}")
-                print(f"Captured generated image: {dst}")
-                
-                # Track in DB if session_id is provided
-                if session_id:
-                    try:
-                        with sqlite3.connect(DB_NAME) as conn:
-                            conn.execute(
-                                "INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)",
-                                (session_id, dst)
-                            )
-                    except Exception as e:
-                        print(f"Error tracking generated file in DB: {e}")
-        
-        # Append image links to output
-        if generated_images:
-            output += "\n\n### Generated Images:\n"
-            for img_path in generated_images:
-                output += f"![Generated Image]({img_path})\n"
-                
-        return output
-    except Exception:
-        # Capture the traceback if an error occurs
-        return f"Error executing code:\n{traceback.format_exc()}"
-    finally:
-        # Restore stdout
-        sys.stdout = old_stdout
+    except Exception as e:
+        return f"Error executing code: {str(e)}"
 
-def get_current_datetime():
+def generate_chart(code: str):
+    """
+    Generates a chart or plot using Python and matplotlib.
+    Use this tool WHENEVER the user asks for a visualization, graph, or chart.
+    
+    IMPORTANT:
+    - You MUST use `plt.savefig('plot.png')` (or any filename ending in .png) to save the plot.
+    - Do NOT use `plt.show()`.
+    - The code should clear the figure before plotting: `plt.clf()` or `plt.close()`.
+    - The tool will return the path to the generated image.
+    """
+    # Ensure generated directory exists
+    os.makedirs(GENERATED_DIR, exist_ok=True)
+    
+    # Create a captured output stream
+    output_capture = io.StringIO()
+    
+    try:
+        # Redirect stdout
+        with contextlib.redirect_stdout(output_capture):
+            # Execute the code
+            # Ensure we are in a clean state
+            plt.clf()
+            exec(code, {'__builtins__': __builtins__, 'np': np, 'pd': pd, 'plt': plt})
+            
+        # Check for generated images in the current directory (which is the root)
+        # We look for recently created .png files
+        generated_file = None
+        
+        # First, check if any PNG files were created in current directory
+        for file in os.listdir('.'):
+            if file.endswith('.png'):
+                # Move to static/generated
+                new_filename = f"chart_{uuid.uuid4()}.png"
+                dest_path = os.path.join(GENERATED_DIR, new_filename)
+                shutil.move(file, dest_path)
+                generated_file = f"/static/generated/{new_filename}"
+                print(f"Found and moved chart: {file} -> {dest_path}")
+                break
+        
+        # If no file was found, try to save the current figure automatically
+        if not generated_file:
+            print("No PNG file found. Attempting to auto-save current figure...")
+            new_filename = f"chart_{uuid.uuid4()}.png"
+            dest_path = os.path.join(GENERATED_DIR, new_filename)
+            plt.savefig(dest_path, bbox_inches='tight', dpi=100)
+            generated_file = f"/static/generated/{new_filename}"
+            print(f"Auto-saved chart to: {dest_path}")
+        
+        output = output_capture.getvalue().strip()
+        
+        if generated_file:
+            return json.dumps({
+                "status": "success",
+                "output": output,
+                "image_path": generated_file,
+                "message": "Chart generated successfully. I will now analyze it."
+            })
+        else:
+            return f"Code executed but no chart was saved. Did you forget `plt.savefig(...)`? Output: {output}"
+        
+    except Exception as e:
+        print(f"Error in generate_chart: {str(e)}")
+        traceback.print_exc()
+        return f"Error generating chart: {str(e)}"
+
+def get_timezone_from_ip(ip_address: str) -> Optional[str]:
+    """
+    Fetches the timezone for a given IP address using ip-api.com.
+    Returns None if lookup fails.
+    """
+    try:
+        # Handle local IP
+        if ip_address in ("127.0.0.1", "::1", "localhost"):
+            return None # Use system default or UTC
+            
+        url = f"http://ip-api.com/json/{ip_address}?fields=timezone"
+        with urllib.request.urlopen(url, timeout=2) as response:
+            data = json.loads(response.read().decode())
+            if "timezone" in data:
+                return data["timezone"]
+    except Exception as e:
+        print(f"Error fetching timezone for IP {ip_address}: {e}")
+    return None
+
+def get_user_timezone():
+    """
+    Returns the timezone of the user based on their IP address.
+    Use this tool when the user asks "What is my timezone?" or similar questions.
+    """
+    client_ip = client_ip_ctx.get()
+    if not client_ip:
+        return "Error: Could not determine client IP."
+        
+    tz = get_timezone_from_ip(client_ip)
+    if tz:
+        return f"User Timezone: {tz}"
+    else:
+        return f"Could not determine timezone for IP: {client_ip}"
+
+def get_current_datetime(timezone: str = None):
     """
     Returns the current date and time.
-    Use this tool when the user asks about the current time, date, or day of the week.
+    Args:
+        timezone (str, optional): The timezone to use (e.g., 'America/New_York', 'Asia/Tokyo').
+                                  If not provided, tries to detect from IP, otherwise defaults to UTC.
     """
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    tz = None
+    
+    # 1. Try user-provided timezone
+    if timezone:
+        try:
+            if ZoneInfo:
+                tz = ZoneInfo(timezone)
+            else:
+                print("ZoneInfo not available, ignoring timezone arg")
+        except Exception as e:
+            return f"Error: Invalid timezone '{timezone}'. Please use a valid IANA timezone name (e.g., 'Europe/London')."
+
+    # 2. Try IP detection if no timezone provided
+    if not tz:
+        client_ip = client_ip_ctx.get()
+        if client_ip:
+            detected_tz_name = get_timezone_from_ip(client_ip)
+            if detected_tz_name and ZoneInfo:
+                try:
+                    tz = ZoneInfo(detected_tz_name)
+                    print(f"Detected timezone from IP {client_ip}: {detected_tz_name}")
+                except Exception:
+                    pass
+    
+    # 3. Get time
+    if tz:
+        now = datetime.datetime.now(tz)
+        tz_name = str(tz)
+    else:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        tz_name = "UTC"
+        
+    return f"Current Date and Time: {now.strftime('%Y-%m-%d %H:%M:%S')} ({tz_name})"
+
+def generate_image(description: str):
+    """
+    Generates an artistic or creative image based on the description using AI.
+    Use this tool for artistic requests like "draw a cat", "create a sunset landscape", etc.
+    DO NOT use this for data visualizations, charts, or graphs - use generate_chart instead.
+    
+    Args:
+        description (str): A detailed description of the image to generate.
+    
+    Returns:
+        str: Markdown formatted image that will be displayed to the user.
+    """
+    # URL encode the description
+    import urllib.parse
+    encoded_description = urllib.parse.quote(description)
+    
+    # Generate Pollinations.ai URL
+    image_url = f"https://image.pollinations.ai/prompt/{encoded_description}?width=1024&height=1024&nologo=true"
+    
+    # Return markdown image
+    return f"![{description}]({image_url})"
 
 def get_coordinates(location: str):
     """
@@ -444,6 +575,14 @@ async def get_home(request: Request, response: Response):
         role = row["role"]
         content = row["content"]
         image_path = row["image_path"]
+        
+        # Skip internal function messages
+        if role == "function":
+            continue
+            
+        # Skip model messages that are function calls (JSON)
+        if role == "model" and content.strip().startswith('{"function_call":'):
+            continue
         
         if role == "user":
             chat_history_html += render_user_message(content, image_path)
@@ -510,10 +649,14 @@ async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile 
     return user_message_html + bot_placeholder_html
 
 @app.get("/stream")
-async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id: str = Query(...), image_path: Optional[str] = None, mime_type: Optional[str] = None, selected_model: str = Cookie("gemini-2.5-flash")):
+async def stream_response(request: Request, prompt: str, session_id: str = Cookie(None), stream_id: str = Query(...), image_path: Optional[str] = None, mime_type: Optional[str] = None, selected_model: str = Cookie("gemini-2.5-flash")):
     """
     The 'session_id' is automatically extracted from the browser cookie.
     """
+    # Set client IP in context for tools to use
+    if request.client:
+        client_ip_ctx.set(request.client.host)
+        
     async def event_generator():
         error_div = '<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Error:</strong> An unexpected error occurred. Please try again.</div>'
         try:
@@ -531,6 +674,7 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
                 
             # Add current message
             current_parts = [prompt]
+            uploaded_file = None # Initialize uploaded_file
             
             if image_path:
                 # Check if it is an image or generic file
@@ -577,7 +721,7 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
                     
                 except Exception as e:
                     print(f"Error uploading file: {e}")
-                    yield format_sse(f"<div><strong>Error:</strong> Failed to upload file to AI: {str(e)}</div>")
+                    yield format_sse(f"<div><strong>Error uploading file:</strong> {str(e)}</div>")
                     # Continue without file? Or return? Let's return to be safe.
                     return
 
@@ -587,26 +731,12 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
             })
 
             # 2. Call Gemini
-            # Instantiate model with the current system instruction
-            current_instruction = get_system_instruction()
-            # Fallback to a default if empty, or just pass None (Gemini handles None fine usually, but let's be safe)
-            if not current_instruction:
-                current_instruction = "You are a helpful AI assistant."
-            
-            # Append Image Generation Instruction
-            current_instruction += f"\n\n{IMAGE_GEN_INSTRUCTION}"
-            
-            # Define tools
+            # Prepare the model's tools and system instruction
             tools = []
+            current_instruction = get_system_instruction() # Start with base instruction
+            has_file_in_context = uploaded_file is not None # Check if file was uploaded in this turn
             
-            # Check if ANY file exists in the conversation (history + current request)
-            has_file_in_context = False
-            
-            # 1. Check current request
-            if image_path:
-                has_file_in_context = True
-            
-            # 2. Check history if not already found
+            # Check history for files too
             if not has_file_in_context:
                 for msg in messages_payload:
                     for part in msg.get('parts', []):
@@ -620,18 +750,27 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
             if not has_file_in_context:
                 if tavily_client:
                     tools.append(search_web)
-                    current_instruction += "\n\nYou have access to a 'search_web' tool. Use it whenever the user asks for current information, news, or facts you don't know. Do NOT invent new tools. Only use 'search_web' for searching."
+                    current_instruction += "\n\nYou have access to a 'search_web' tool. You must use it whenever the user asks for current information, news, or facts you don't know. Do NOT invent new tools. Only use 'search_web' for searching."
                 
-                tools.append(execute_python)
-                current_instruction += "\n\nYou have access to an 'execute_python' tool. Use it for calculations, math, or complex logic. It is allowed to import any Python module (including matplotlib). The code MUST print the result to stdout. If you generate plots or images, save them to the current directory (e.g. 'plot.png'). The tool will capture them and provide a markdown link (e.g. `![Generated Image](/static/generated/...)`). You MUST include this markdown link in your final response to the user."
+                tools.append(execute_calculation)
+                current_instruction += "\n\nYou have access to an 'execute_calculation' tool. Use it for math, logic, text processing, or data analysis (numpy/pandas). It returns TEXT output. It CANNOT generate images."
+
+                tools.append(generate_chart)
+                current_instruction += "\n\nYou have access to a 'generate_chart' tool. **CRITICAL**: You MUST use this tool for ANY visualization request (charts, graphs, plots, diagrams). DO NOT provide Python code to the user. DO NOT use execute_calculation for charts. ALWAYS call 'generate_chart' when the user asks for any kind of visual representation of data. If you provide code instead of calling the tool, you have FAILED."
+
+                tools.append(generate_image)
+                current_instruction += "\n\nYou have access to a 'generate_image' tool. Use it for artistic or creative image requests like 'draw a cat', 'create a sunset landscape', etc. DO NOT use this for data visualizations - use generate_chart instead."
 
                 tools.append(get_current_datetime)
-                current_instruction += "\n\nYou have access to a 'get_current_datetime' tool. Use it when asked about the current time or date."
+                current_instruction += "\n\nYou have access to a 'get_current_datetime' tool. Use it when asked about the current time or date. It automatically detects the user's timezone from their IP. You can also pass a 'timezone' argument (e.g., 'Asia/Tokyo') if the user explicitly requests a specific timezone."
+
+                tools.append(get_user_timezone)
+                current_instruction += "\n\nYou have access to a 'get_user_timezone' tool. Use it when the user asks 'What is my timezone?' or wants to know the timezone detected from their IP."
 
                 tools.append(get_coordinates)
                 current_instruction += "\n\nYou have access to a 'get_coordinates' tool. Use it to find the latitude and longitude of locations."
             else:
-                # SIMPLIFIED APPROACH: When files are present, clear history to avoid API compatibility issues
+                # When files are present, clear history to avoid API compatibility issues
                 # Keep only the current message (last one in payload)
                 print("Tools disabled due to file context. Clearing history to avoid API errors.")
                 if messages_payload:
@@ -639,6 +778,10 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
                     messages_payload = [current_msg]
                 
                 current_instruction += "\n\nNote: Tool calling is disabled because you are analyzing an uploaded file. Focus on the file content."
+
+            # Debug: Print registered tools
+            tool_names = [t.__name__ if hasattr(t, '__name__') else str(t) for t in tools]
+            print(f"Registered tools: {tool_names}")
 
             model = genai.GenerativeModel(
                 model_name=selected_model,
@@ -651,19 +794,18 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
             # automatic function calling isn't fully supported in stream mode for single-turn logic easily without chat session.
             # But we can do it manually.
             
-            # Multi-turn loop
-            max_turns = 5
+            # Main loop for handling function calls
             turn = 0
+            max_turns = 10
+            full_response_text = ""  # Initialize to prevent UnboundLocalError
             
             while turn < max_turns:
                 turn += 1
-                print(f"Turn {turn}/{max_turns}...")
-                
                 # First attempt - Use stream=False to safely check for function calls
                 # This avoids complexity with iterating streams for tool use
                 print("Sending request to model (stream=False)...")
                 if turn > 1:
-                     yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking (Step {turn})...</div>')
+                     yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking (Step {turn})...</div>')
                 else:
                      yield format_sse('<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking...</div>')
                 
@@ -744,11 +886,17 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
                         # Execute tool
                         if fn_name == "search_web":
                             api_response = search_web(fn_args.get("query"))
-                        elif fn_name == "execute_python":
-                            # Pass session_id for file tracking
-                            api_response = execute_python(fn_args.get("code"), session_id=session_id)
+                        elif fn_name == "execute_calculation":
+                            api_response = execute_calculation(fn_args.get("code"))
+                        elif fn_name == "generate_chart":
+                            api_response = generate_chart(fn_args.get("code"))
+                        elif fn_name == "generate_image":
+                            api_response = generate_image(fn_args.get("description"))
                         elif fn_name == "get_current_datetime":
-                            api_response = get_current_datetime()
+                            timezone_arg = fn_args.get("timezone")
+                            api_response = get_current_datetime(timezone_arg) if timezone_arg else get_current_datetime()
+                        elif fn_name == "get_user_timezone":
+                            api_response = get_user_timezone()
                         elif fn_name == "get_coordinates":
                             api_response = get_coordinates(fn_args.get("location"))
                         else:
@@ -791,6 +939,69 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
                         })
                         save_message(session_id, "function", fr_json)
                         
+                        # CHART DISPLAY: If a chart was generated, display it directly
+                        if fn_name == "generate_chart":
+                            try:
+                                # Check if response is valid JSON
+                                try:
+                                    resp_data = json.loads(api_response)
+                                except json.JSONDecodeError:
+                                    print(f"Warning: generate_chart returned non-JSON response: {api_response}")
+                                    resp_data = None
+                                    
+                                if isinstance(resp_data, dict) and "image_path" in resp_data:
+                                    chart_path = resp_data["image_path"]
+                                    print(f"Chart generated at {chart_path}.")
+                                    
+                                    # Display chart to user immediately
+                                    yield format_sse(f'<div class="mb-2"><img src="{chart_path}" alt="Generated Chart" class="max-w-full h-auto rounded-lg shadow-md"/></div>')
+                                    
+                                    # Set response text for history
+                                    full_response_text = f"![Generated Chart]({chart_path})\n\n*Chart generated successfully.*"
+                                    
+                                    # Notify UI
+                                    yield format_sse(f'<div class="text-xs text-gray-500 mb-2 italic">Chart generated successfully.</div>')
+                                    
+                                    # Break - chart is displayed
+                                    break
+                                    
+                            except Exception as e:
+                                print(f"Error displaying chart: {e}")
+                                traceback.print_exc()
+                        
+                        # IMAGE DISPLAY: If an image was generated, display it directly
+                        if fn_name == "generate_image":
+                            try:
+                                print(f"Image generation response: {api_response}")
+                                # The api_response contains markdown: ![description](url)
+                                # Extract the URL and display as an img tag
+                                import re
+                                match = re.search(r'!\[([^\]]*)\]\(([^\)]+)\)', api_response)
+                                if match:
+                                    description = match.group(1)
+                                    image_url = match.group(2)
+                                    print(f"Extracted image URL: {image_url}")
+                                    
+                                    # Display image directly
+                                    yield format_sse(f'<div class="mb-2"><img src="{image_url}" alt="{description}" class="max-w-full h-auto rounded-lg shadow-md"/></div>')
+                                    
+                                    # Set response text for history (keep as markdown so it persists)
+                                    full_response_text = api_response
+                                    
+                                    # Break out of loop
+                                    print("Breaking out of loop after image display")
+                                    break
+                                else:
+                                    print("Failed to parse markdown image")
+                                    # Fallback if markdown parsing fails
+                                    yield format_sse(f'<div class="mb-2">{api_response}</div>')
+                                    full_response_text = api_response
+                                    break
+                                
+                            except Exception as e:
+                                print(f"Error displaying image: {e}")
+                                traceback.print_exc()
+                        
                         # CONTINUE LOOP to let model use the result
                         continue
                     
@@ -804,6 +1015,10 @@ async def stream_response(prompt: str, session_id: str = Cookie(None), stream_id
                 except Exception as e:
                     print(f"Error processing response: {e}")
                     yield format_sse(f"Error: {str(e)}")
+                    break
+                
+                # If we broke from the parts loop and have a response, exit turn loop
+                if full_response_text:
                     break
 
             # 3. Save to Session History
