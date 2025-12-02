@@ -145,7 +145,7 @@ uvicorn main:app --reload
 
 The chatbot has access to the following tools:
 
-* 1.  **`search_web(query)`**: Searches the internet using Tavily API.
+1.  **`search_web(query)`**: Searches the internet using Tavily API.
 2.  **`execute_calculation(code)`**: Executes Python code (numpy/pandas) for math/logic.
 3.  **`generate_chart(code)`**: Creates visualizations using matplotlib.
 4.  **`generate_image(description)`**: Generates artistic images via Pollinations.ai.
