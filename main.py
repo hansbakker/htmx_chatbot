@@ -22,6 +22,7 @@ from collections import deque
 
 # Context variable to store client IP
 client_ip_ctx = contextvars.ContextVar("client_ip", default=None)
+session_id_ctx = contextvars.ContextVar("session_id", default=None)
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Form, Response, Cookie, File, UploadFile, Query
@@ -125,9 +126,16 @@ def init_db():
                 id TEXT PRIMARY KEY,
                 title TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                is_archived INTEGER DEFAULT 0
             )
         """)
+        
+        # Migration: Add is_archived column if it doesn't exist
+        try:
+            conn.execute("ALTER TABLE conversations ADD COLUMN is_archived INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass # Column likely exists
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
@@ -182,11 +190,44 @@ def init_db():
 # Initialize DB on startup
 init_db()
 
-def get_conversations(limit: int = 50):
+def get_conversations(limit: int = 50, include_archived: bool = False):
+    """Get conversations, optionally filtering out archived ones."""
     with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
         conn.row_factory = sqlite3.Row
-        cursor = conn.execute("SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?", (limit,))
+        if include_archived:
+            cursor = conn.execute("SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?", (limit,))
+        else:
+            cursor = conn.execute("SELECT * FROM conversations WHERE is_archived = 0 ORDER BY updated_at DESC LIMIT ?", (limit,))
         return [dict(row) for row in cursor.fetchall()]
+
+def delete_chat_files(session_id: str):
+    """Delete all files associated with a chat session."""
+    import os
+    
+    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+        # Get generated files
+        cursor = conn.execute("SELECT file_path FROM generated_files WHERE session_id = ?", (session_id,))
+        generated_files = [row[0] for row in cursor.fetchall()]
+        
+        # Get uploaded files
+        cursor = conn.execute("SELECT image_path FROM messages WHERE session_id = ? AND image_path IS NOT NULL", (session_id,))
+        uploaded_files = [row[0] for row in cursor.fetchall()]
+        
+        # Delete physical files
+        all_files = generated_files + uploaded_files
+        for file_path in all_files:
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    print(f"Deleted file: {file_path}")
+            except Exception as e:
+                print(f"Error deleting file {file_path}: {e}")
+        
+        # Delete database records
+        conn.execute("DELETE FROM generated_files WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM conversations WHERE id = ?", (session_id,))
+        conn.commit()
 
 @retry_on_db_lock()
 def get_history(session_id: str) -> List[Dict[str, str]]:
@@ -363,6 +404,155 @@ async def load_chat(session_id: str, response: Response):
     response.set_cookie(key="session_id", value=session_id, max_age=31536000)
     response.headers["HX-Redirect"] = "/" # Redirect to home to reload everything
     return response
+
+# --- Helper Functions for Rendering ---
+
+def render_sidebar_html(current_session_id: str) -> str:
+    """Renders the sidebar chat list HTML."""
+    conversations = get_conversations()
+    sidebar_html = ""
+    for chat in conversations:
+        is_current = "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 font-medium" if chat['id'] == current_session_id else "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800"
+        sidebar_html += f"""
+        <div class="relative group">
+            <button hx-get="/load-chat/{chat['id']}" hx-swap="none"
+                class="w-full text-left px-3 py-2 rounded-md text-sm truncate transition-colors flex items-center gap-2 {is_current}">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 opacity-50 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                </svg>
+                <span class="truncate flex-1">{chat['title']}</span>
+            </button>
+            <!-- Context Menu Button -->
+            <button onclick="toggleMenu('menu-{chat['id']}')" 
+                class="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-opacity">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-500 dark:text-gray-400" fill="currentColor" viewBox="0 0 16 16">
+                    <path d="M3 9.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/>
+                </svg>
+            </button>
+            <!-- Dropdown Menu -->
+            <div id="menu-{chat['id']}" class="hidden absolute right-0 top-8 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md shadow-lg z-50 min-w-[120px]">
+                <button onclick="renameChat('{chat['id']}', '{chat['title']}')" 
+                    class="w-full text-left px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2">
+                    <span>🏷️</span> Rename
+                </button>
+                <button hx-post="/archive-chat/{chat['id']}" hx-swap="none"
+                    class="w-full text-left px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2">
+                    <span>📦</span> Archive
+                </button>
+                <button hx-delete="/delete-chat/{chat['id']}" hx-swap="none"
+                    hx-confirm="Permanently delete this chat and all associated files?"
+                    class="w-full text-left px-3 py-2 text-sm hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400 flex items-center gap-2">
+                    <span>🗑️</span> Delete
+                </button>
+            </div>
+        </div>
+        """
+    return sidebar_html
+
+def render_archived_list_html() -> str:
+    """Renders the archived chats list HTML."""
+    archived = get_conversations(limit=100, include_archived=True)
+    archived = [chat for chat in archived if chat.get('is_archived', 0) == 1]
+    
+    if not archived:
+        return '<div class="text-gray-500 dark:text-gray-400 text-sm">No archived chats</div>'
+    
+    html = ""
+    for chat in archived:
+        html += f"""
+        <div class="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800 rounded-md mb-2">
+            <span class="text-sm truncate flex-1 text-gray-700 dark:text-gray-200">{chat['title']}</span>
+            <div class="flex gap-2">
+                <button hx-post="/unarchive-chat/{chat['id']}" hx-swap="none"
+                    class="text-xs px-2 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded">
+                    Unarchive
+                </button>
+                <button hx-delete="/delete-chat/{chat['id']}" hx-swap="none"
+                    hx-confirm="Permanently delete this chat and all associated files?"
+                    class="text-xs px-2 py-1 bg-red-500 hover:bg-red-600 text-white rounded">
+                    Delete
+                </button>
+            </div>
+        </div>
+        """
+    return html
+
+# --- Routes ---
+
+@app.post("/rename-chat/{session_id}")
+async def rename_chat(session_id: str, new_title: str = Form(...)):
+    """Rename a chat conversation."""
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.execute("UPDATE conversations SET title = ? WHERE id = ?", (new_title, session_id))
+            conn.commit()
+        return HTMLResponse("<div>Chat renamed successfully</div>")
+    except Exception as e:
+        return HTMLResponse(f"<div>Error: {str(e)}</div>", status_code=500)
+
+@app.post("/archive-chat/{session_id}")
+async def archive_chat(session_id: str, request: Request):
+    """Archive a chat conversation."""
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.execute("UPDATE conversations SET is_archived = 1 WHERE id = ?", (session_id,))
+            conn.commit()
+        
+        current_session_id = request.cookies.get("session_id")
+        sidebar_html = render_sidebar_html(current_session_id)
+        archived_html = render_archived_list_html()
+        
+        return HTMLResponse(
+            f'<div id="chat-list" hx-swap-oob="innerHTML">{sidebar_html}</div>'
+            f'<div id="archived-list" hx-swap-oob="innerHTML">{archived_html}</div>'
+        )
+    except Exception as e:
+        return HTMLResponse(f"<div>Error: {str(e)}</div>", status_code=500)
+
+@app.post("/unarchive-chat/{session_id}")
+async def unarchive_chat(session_id: str, request: Request):
+    """Unarchive a chat conversation."""
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.execute("UPDATE conversations SET is_archived = 0 WHERE id = ?", (session_id,))
+            conn.commit()
+            
+        current_session_id = request.cookies.get("session_id")
+        sidebar_html = render_sidebar_html(current_session_id)
+        archived_html = render_archived_list_html()
+        
+        return HTMLResponse(
+            f'<div id="chat-list" hx-swap-oob="innerHTML">{sidebar_html}</div>'
+            f'<div id="archived-list" hx-swap-oob="innerHTML">{archived_html}</div>'
+        )
+    except Exception as e:
+        return HTMLResponse(f"<div>Error: {str(e)}</div>", status_code=500)
+
+@app.delete("/delete-chat/{session_id}")
+async def delete_chat_route(session_id: str, request: Request):
+    """Permanently delete a chat conversation and all associated files."""
+    try:
+        delete_chat_files(session_id)
+        
+        current_session_id = request.cookies.get("session_id")
+        sidebar_html = render_sidebar_html(current_session_id)
+        archived_html = render_archived_list_html()
+        
+        return HTMLResponse(
+            f'<div id="chat-list" hx-swap-oob="innerHTML">{sidebar_html}</div>'
+            f'<div id="archived-list" hx-swap-oob="innerHTML">{archived_html}</div>'
+        )
+    except Exception as e:
+        return HTMLResponse(f"<div>Error: {str(e)}</div>", status_code=500)
+
+@app.get("/archived-chats")
+async def get_archived_chats():
+    """Get list of archived chats for settings modal."""
+    try:
+        html = render_archived_list_html()
+        return HTMLResponse(html)
+    except Exception as e:
+        return HTMLResponse(f"<div>Error: {str(e)}</div>", status_code=500)
 
 # Helper to render messages (DRY)
 def render_user_message(content: str, image_path: Optional[str] = None) -> str:
@@ -544,6 +734,20 @@ def generate_chart(code: str):
         output = output_capture.getvalue().strip()
         
         if generated_file:
+            # Save to database if session_id is available
+            session_id = session_id_ctx.get()
+            if session_id:
+                try:
+                    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                        # Store the absolute path for deletion purposes, or relative if preferred.
+                        # delete_chat_files uses os.remove(file_path), so we need the filesystem path.
+                        # generated_file is the web path (/static/generated/...).
+                        # dest_path is the filesystem path.
+                        conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, dest_path))
+                        print(f"Saved generated file record for session {session_id}: {dest_path}")
+                except Exception as db_e:
+                    print(f"Error saving generated file to DB: {db_e}")
+
             return json.dumps({
                 "status": "success",
                 "output": output,
@@ -996,6 +1200,9 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
     # Set client IP in context for tools to use
     if request.client:
         client_ip_ctx.set(request.client.host)
+    
+    if session_id:
+        session_id_ctx.set(session_id)
         
     async def event_generator():
         error_div = '<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Error:</strong> An unexpected error occurred. Please try again.</div>'
@@ -1489,10 +1696,10 @@ async def get_system_instruction_ui(selected_model: str = Cookie("gemini-2.5-fla
     instruction = get_system_instruction()
     return f"""
     <div class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in" id="settings-modal">
-        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden transform transition-all">
-            <div class="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
-                <h3 class="text-lg font-semibold text-gray-800">System Settings</h3>
-                <button onclick="document.getElementById('settings-modal').remove()" class="text-gray-400 hover:text-gray-600 transition-colors">
+        <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden transform transition-all border border-gray-100 dark:border-gray-700">
+            <div class="p-6 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-900/50">
+                <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-100">System Settings</h3>
+                <button onclick="document.getElementById('settings-modal').remove()" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                     </svg>
@@ -1500,17 +1707,17 @@ async def get_system_instruction_ui(selected_model: str = Cookie("gemini-2.5-fla
             </div>
             <div class="p-6 space-y-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-2">System Instruction (Persona)</label>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">System Instruction (Persona)</label>
                     <textarea name="instruction" 
-                              class="w-full h-32 p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm resize-none"
+                              class="w-full h-32 p-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 dark:focus:border-blue-400 transition-all text-sm resize-none text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500"
                               placeholder="e.g., You are a helpful assistant...">{instruction}</textarea>
-                    <p class="text-xs text-gray-500 mt-2">This instruction will be applied to all new messages.</p>
+                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">This instruction will be applied to all new messages.</p>
                 </div>
                 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 mb-2">Model Selection</label>
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Model Selection</label>
                     <select name="model" 
-                            class="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-sm">
+                            class="w-full p-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 dark:focus:border-blue-400 transition-all text-sm text-gray-800 dark:text-gray-200">
                         <option value="gemini-2.5-flash" {'selected' if selected_model == 'gemini-2.5-flash' else ''}>Gemini 2.5 Flash (Fastest)</option>
                         <option value="gemini-2.5-flash-lite" {'selected' if selected_model == 'gemini-2.5-flash-lite' else ''}>Gemini 2.5 Flash Lite</option>
                         <option value="gemini-2.5-flash-tts" {'selected' if selected_model == 'gemini-2.5-flash-tts' else ''}>Gemini 2.5 Flash TTS</option>
@@ -1518,10 +1725,31 @@ async def get_system_instruction_ui(selected_model: str = Cookie("gemini-2.5-fla
                         <option value="gemini-3-pro" {'selected' if selected_model == 'gemini-3-pro' else ''}>Gemini 3 Pro (Most Capable)</option>
                     </select>
                 </div>
+
+                <div class="border-t border-gray-100 dark:border-gray-700 pt-4">
+                    <details class="group">
+                        <summary class="list-none flex justify-between items-center cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
+                            <span>Archived Chats</span>
+                            <span class="transition group-open:rotate-180">
+                                <svg fill="none" height="24" shape-rendering="geometricPrecision" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" viewBox="0 0 24 24" width="24"><path d="M6 9l6 6 6-6"></path></svg>
+                            </span>
+                        </summary>
+                        <div class="text-gray-500 dark:text-gray-400 mt-3 group-open:animate-fadeIn">
+                            <div id="archived-list" hx-get="/archived-chats" hx-trigger="load" class="max-h-40 overflow-y-auto space-y-1">
+                                <div class="flex justify-center p-2">
+                                    <svg class="animate-spin h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                </div>
+                            </div>
+                        </div>
+                    </details>
+                </div>
             </div>
-            <div class="p-6 border-t border-gray-100 bg-gray-50 flex justify-end gap-3">
+            <div class="p-6 border-t border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50 flex justify-end gap-3">
                 <button onclick="document.getElementById('settings-modal').remove()" 
-                        class="px-4 py-2 text-sm font-medium text-gray-600 hover:text-gray-800 transition-colors">
+                        class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors">
                     Cancel
                 </button>
                 <button hx-post="/settings/system_instruction" 

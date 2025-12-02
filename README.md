@@ -12,9 +12,11 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 *   **Dark Mode:** Toggle between light and dark themes with persistent preference storage.
 *   **Chat History & Sidebar:**
     *   Sidebar navigation showing all previous conversations.
+    *   **Context Menu:** Rename, Archive, or Delete chats directly from the sidebar.
     *   Auto-saved chat sessions with smart naming based on first message.
     *   Easy switching between conversations.
     *   "New Chat" button to start fresh conversations.
+    *   **Archived Chats:** View and manage archived conversations via the Settings panel.
 *   **Smart Scroll Behavior:** Intelligently positions user queries at the top while showing as much of the response as possible.
 *   **System Instructions:** Configure the AI's persona (e.g., "You are a pirate") via a built-in settings panel. Persists across sessions.
 *   **Model Selection:** Choose from multiple Gemini models (Flash, Pro, Flash Thinking) via the settings panel.
@@ -103,6 +105,8 @@ uvicorn main:app --reload
 *   **Access the UI:** Open `http://127.0.0.1:8000` in your browser.
 *   **Dark Mode:** Click the moon/sun icon in the header to toggle between light and dark themes.
 *   **Chat History:** View all your previous conversations in the left sidebar. Click any chat to load it.
+*   **Manage Chats:** Hover over a chat in the sidebar and click the three-dot menu (⋮) to **Rename**, **Archive**, or **Delete** it.
+*   **Archived Chats:** Go to Settings > Archived Chats to view, unarchive, or permanently delete hidden conversations.
 *   **New Chat:** Click the "New Chat" button in the sidebar (or header on mobile) to start a fresh conversation.
 *   **Configure Persona:** Click the "Settings" button in the top right to change the AI's system instruction.
 *   **Select Model:** In the settings panel, choose your preferred Gemini model (Flash, Pro, or Flash Thinking).

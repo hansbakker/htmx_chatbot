@@ -112,23 +112,51 @@
 				</button>
 			</div>
 
-			<div class="flex-1 overflow-y-auto p-2 space-y-1">
+			<div class="flex-1 overflow-y-auto p-2 space-y-1" id="chat-list">
 				<div class="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider px-2 py-2">
 					Previous Chats</div>
 				{% for chat in conversations %}
-				<button hx-get="/load-chat/{{ chat.id }}" hx-swap="none" class="w-full text-left px-3 py-2 rounded-md text-sm truncate transition-colors flex items-center gap-2 group
+				<div class="relative group">
+					<button hx-get="/load-chat/{{ chat.id }}" hx-swap="none" class="w-full text-left px-3 py-2 rounded-md text-sm truncate transition-colors flex items-center gap-2
 					{% if chat.id == current_session_id %}
 						bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 font-medium
 					{% else %}
 						text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800
 					{% endif %}">
-					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 opacity-50 flex-shrink-0" fill="none"
-						viewBox="0 0 24 24" stroke="currentColor">
-						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-							d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
-					</svg>
-					<span class="truncate">{{ chat.title }}</span>
-				</button>
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 opacity-50 flex-shrink-0" fill="none"
+							viewBox="0 0 24 24" stroke="currentColor">
+							<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+								d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+						</svg>
+						<span class="truncate flex-1">{{ chat.title }}</span>
+					</button>
+					<!-- Context Menu Button -->
+					<button onclick="toggleMenu('menu-{{ chat.id }}')"
+						class="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-opacity">
+						<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-500 dark:text-gray-400"
+							fill="currentColor" viewBox="0 0 16 16">
+							<path
+								d="M3 9.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z" />
+						</svg>
+					</button>
+					<!-- Dropdown Menu -->
+					<div id="menu-{{ chat.id }}"
+						class="hidden absolute right-0 top-8 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md shadow-lg z-50 min-w-[120px]">
+						<button onclick="renameChat('{{ chat.id }}', '{{ chat.title }}')"
+							class="w-full text-left px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2">
+							<span>🏷️</span> Rename
+						</button>
+						<button hx-post="/archive-chat/{{ chat.id }}" hx-swap="none"
+							class="w-full text-left px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center gap-2">
+							<span>📦</span> Archive
+						</button>
+						<button hx-delete="/delete-chat/{{ chat.id }}" hx-swap="none"
+							hx-confirm="Permanently delete this chat and all associated files?"
+							class="w-full text-left px-3 py-2 text-sm hover:bg-red-50 dark:hover:bg-red-900/20 text-red-600 dark:text-red-400 flex items-center gap-2">
+							<span>🗑️</span> Delete
+						</button>
+					</div>
+				</div>
 				{% endfor %}
 			</div>
 		</div>
@@ -289,6 +317,48 @@
 				document.documentElement.classList.add('dark');
 			}
 		})();
+
+		// Context Menu Functions
+		function toggleMenu(menuId) {
+			// Close all other menus first
+			document.querySelectorAll('[id^="menu-"]').forEach(menu => {
+				if (menu.id !== menuId) {
+					menu.classList.add('hidden');
+				}
+			});
+
+			// Toggle the clicked menu
+			const menu = document.getElementById(menuId);
+			menu.classList.toggle('hidden');
+		}
+
+		// Close menus when clicking outside
+		document.addEventListener('click', function (event) {
+			if (!event.target.closest('[id^="menu-"]') && !event.target.closest('button[onclick^="toggleMenu"]')) {
+				document.querySelectorAll('[id^="menu-"]').forEach(menu => {
+					menu.classList.add('hidden');
+				});
+			}
+		});
+
+		// Rename Chat Function
+		function renameChat(chatId, currentTitle) {
+			const newTitle = prompt('Enter new chat name:', currentTitle);
+			if (newTitle && newTitle !== currentTitle) {
+				// Create a form and submit via HTMX
+				const formData = new FormData();
+				formData.append('new_title', newTitle);
+
+				fetch(`/rename-chat/${chatId}`, {
+					method: 'POST',
+					body: formData
+				}).then(() => {
+					// Reload the page to show updated title
+					window.location.reload();
+				});
+			}
+		}
+
 
 		// Listen for HTMX swaps to highlight code and render math
 		document.body.addEventListener('htmx:afterSwap', function (evt) {
