@@ -9,6 +9,12 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 *   **Zero-Build Frontend:** No Webpack, no node_modules, no hydration. Uses Tailwind CSS via CDN.
 *   **Real-Time Streaming:** Uses SSE to push LLM tokens to the browser instantly.
 *   **Modern UI:** Clean, responsive interface with distinct user/bot message styling and animations.
+*   **Dark Mode:** Toggle between light and dark themes with persistent preference storage.
+*   **Chat History & Sidebar:**
+    *   Sidebar navigation showing all previous conversations.
+    *   Auto-saved chat sessions with smart naming based on first message.
+    *   Easy switching between conversations.
+    *   "New Chat" button to start fresh conversations.
 *   **Smart Scroll Behavior:** Intelligently positions user queries at the top while showing as much of the response as possible.
 *   **System Instructions:** Configure the AI's persona (e.g., "You are a pirate") via a built-in settings panel. Persists across sessions.
 *   **Model Selection:** Choose from multiple Gemini models (Flash, Pro, Flash Thinking) via the settings panel.
@@ -23,6 +29,7 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 *   **Intelligent Tools:**
     *   **Web Search:** Integrated with **Tavily API** for real-time information retrieval.
     *   **Python Execution:** Separate tools for calculations (`execute_calculation`) and visualizations (`generate_chart`).
+    *   **Weather Services:** Real-time weather data via **XWeather MCP** (current conditions, forecasts, precipitation timing).
     *   **Timezone Awareness:** Automatically detects user timezone from IP address, with manual override support.
     *   **Date/Time:** Get current time in user's timezone or any specified timezone.
     *   **Location Services:** Find coordinates for locations using geopy.
@@ -63,7 +70,11 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
     ```ini
     GEMINI_API_KEY=your_gemini_api_key_here
     TAVILY_API_KEY=your_tavily_api_key_here
+    XWEATHER_MCP_ID=your_xweather_client_id_here
+    XWEATHER_MCP_SECRET=your_xweather_client_secret_here
     ```
+    
+    **Note:** XWeather credentials are optional. If not provided, weather-related tools will not be available.
 
 ## Project Structure
 
@@ -85,12 +96,14 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 ## Running the Application
 
 Start the development server with hot-reloading:
-
 ```bash
 uvicorn main:app --reload
 ```
 
 *   **Access the UI:** Open `http://127.0.0.1:8000` in your browser.
+*   **Dark Mode:** Click the moon/sun icon in the header to toggle between light and dark themes.
+*   **Chat History:** View all your previous conversations in the left sidebar. Click any chat to load it.
+*   **New Chat:** Click the "New Chat" button in the sidebar (or header on mobile) to start a fresh conversation.
 *   **Configure Persona:** Click the "Settings" button in the top right to change the AI's system instruction.
 *   **Select Model:** In the settings panel, choose your preferred Gemini model (Flash, Pro, or Flash Thinking).
 *   **Upload Files:** Click the paperclip icon to upload any file (images, PDFs, CSVs, text files, etc.).
@@ -100,6 +113,7 @@ uvicorn main:app --reload
 *   **Generate Charts:** Ask "Create a bar chart showing Q1=100, Q2=150, Q3=120, Q4=180" (data visualization via matplotlib).
 *   **Search Web:** Ask "What is the price of Bitcoin?".
 *   **Run Calculations:** Ask "Calculate the 100th Fibonacci number".
+*   **Get Weather:** Ask "What's the weather in London?" or "What's the forecast for next week in Paris?".
 *   **Get Time/Date:** Ask "What time is it?" (automatically detects your timezone) or "What time is it in Tokyo?".
 *   **Get Timezone:** Ask "What is my timezone?".
 
@@ -131,18 +145,21 @@ uvicorn main:app --reload
 
 The chatbot has access to the following tools:
 
-*   **`search_web(query)`** - Search the web for current information using Tavily API
-*   **`execute_calculation(code)`** - Execute Python code for calculations and data processing (text output only)
-*   **`generate_chart(code)`** - Generate data visualizations using matplotlib (returns image)
-*   **`generate_image(description)`** - Generate artistic images using Pollinations.ai (returns image)
-*   **`get_current_datetime(timezone?)`** - Get current date/time with automatic timezone detection or manual override
-*   **`get_user_timezone()`** - Get user's timezone based on IP address
-*   **`get_coordinates(location)`** - Get latitude/longitude for a location using geopy
+* 1.  **`search_web(query)`**: Searches the internet using Tavily API.
+2.  **`execute_calculation(code)`**: Executes Python code (numpy/pandas) for math/logic.
+3.  **`generate_chart(code)`**: Creates visualizations using matplotlib.
+4.  **`generate_image(description)`**: Generates artistic images via Pollinations.ai.
+5.  **`get_current_datetime(timezone)`**: Returns current date/time (timezone-aware).
+6.  **`get_user_timezone()`**: Returns the user's detected timezone.
+7.  **`get_coordinates(location)`**: Returns latitude/longitude for a location.
+8.  **`get_weather(location)`**: Returns current weather for a location via XWeather MCP.
+9.  **`get_forecast_weather(location)`**: Returns multi-day weather forecast via XWeather MCP.
+10. **`get_precipitation_timing(location)`**: Returns rain/snow start/stop timing via XWeather MCP.
 
 ## Troubleshooting
 
-*   **Quota Exceeded:** If you see a red "Quota Exceeded" error, wait a minute and try again. The app handles this gracefully.
-*   **No Search Results:** Ensure `TAVILY_API_KEY` is set in `.env`.
+*   **Timezone Detection on Localhost:** When running locally (`127.0.0.1`), the IP detection will see a local IP (e.g., `127.0.0.1`) which cannot be geolocated. In this case, the system defaults to `UTC`. To test timezone detection, you can manually set the `X-Forwarded-For` header or deploy to a public server.
+*   **XWeather API Errors:** If you see "invalid location" errors, try specifying the location more precisely (e.g., "City, Country" or Zip Code). Ensure `XWEATHER_MCP_ID` and `XWEATHER_MCP_SECRET` are set in `.env`.
 *   **File Upload Fails:** Ensure `static/uploads/` directory exists (created automatically).
 *   **Tools Not Working After File Upload:** When a file is in context, tools are automatically disabled. Click "📎 Clear File Context" to re-enable them.
 *   **Lost Conversation History:** File analysis temporarily clears history for API compatibility. Use "Clear File Context" to restore history when done analyzing files.

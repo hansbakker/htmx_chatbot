@@ -71,7 +71,14 @@ def get_system_instruction() -> str:
     if os.path.exists(SYSTEM_INSTRUCTION_FILE):
         with open(SYSTEM_INSTRUCTION_FILE, "r") as f:
             return f.read().strip()
-    return "You are a helpful AI assistant."
+    return """you are a helpfull AI assistant and you:
+- always offer follow up actions,
+- use metric system for measurements,
+- use Centigrade for temperature,   
+- my location is : "Zeist, The Netherlands".  use that location for any queries that relate to the 'implied' current location of the user (i.e. 'here') when approximate or precise location is needed to answer the question,
+- when using the execute_calculation tool, offer the the user to show the code that was used for the calculation,
+- when using the search_web tool remember the urls of the sources that were found, and offer to provide them,
+- when providing a URL make sure it's clickable, with target being a new tab"""
 
 def save_system_instruction(instruction: str):
     with open(SYSTEM_INSTRUCTION_FILE, "w") as f:
@@ -114,6 +121,15 @@ def init_db():
         conn.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
         
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
@@ -121,7 +137,8 @@ def init_db():
                 content TEXT NOT NULL,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                 image_path TEXT,
-                mime_type TEXT
+                mime_type TEXT,
+                FOREIGN KEY(session_id) REFERENCES conversations(id)
             )
         """)
         # Migration for existing table
@@ -147,10 +164,29 @@ def init_db():
             )
         """)
         
+        # Populate conversations from existing messages if needed
+        cursor = conn.execute("SELECT DISTINCT session_id FROM messages WHERE session_id NOT IN (SELECT id FROM conversations)")
+        existing_sessions = cursor.fetchall()
+        for (session_id,) in existing_sessions:
+            # Get first message for title
+            cursor = conn.execute("SELECT content FROM messages WHERE session_id = ? AND role = 'user' ORDER BY id ASC LIMIT 1", (session_id,))
+            first_msg = cursor.fetchone()
+            title = "New Chat"
+            if first_msg:
+                title = first_msg[0][:30] + "..." if len(first_msg[0]) > 30 else first_msg[0]
+            
+            conn.execute("INSERT INTO conversations (id, title) VALUES (?, ?)", (session_id, title))
+        
         print("Database initialized with WAL mode enabled")
 
 # Initialize DB on startup
 init_db()
+
+def get_conversations(limit: int = 50):
+    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute("SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?", (limit,))
+        return [dict(row) for row in cursor.fetchall()]
 
 @retry_on_db_lock()
 def get_history(session_id: str) -> List[Dict[str, str]]:
@@ -230,10 +266,104 @@ def get_history(session_id: str) -> List[Dict[str, str]]:
 @retry_on_db_lock()
 def save_message(session_id: str, role: str, content: str, image_path: Optional[str] = None, mime_type: Optional[str] = None, gemini_uri: Optional[str] = None):
     with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+        # Ensure conversation exists
+        cursor = conn.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
+        if not cursor.fetchone():
+            title = "New Chat"
+            if role == "user":
+                title = content[:30] + "..." if len(content) > 30 else content
+            conn.execute("INSERT INTO conversations (id, title) VALUES (?, ?)", (session_id, title))
+        elif role == "user":
+             # Update updated_at
+             conn.execute("UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
+             
+             # Update title if it's still generic
+             cursor = conn.execute("SELECT title FROM conversations WHERE id = ?", (session_id,))
+             current_title = cursor.fetchone()[0]
+             if current_title == "New Chat":
+                 new_title = content[:30] + "..." if len(content) > 30 else content
+                 conn.execute("UPDATE conversations SET title = ? WHERE id = ?", (new_title, session_id))
+
         conn.execute(
             "INSERT INTO messages (session_id, role, content, image_path, mime_type, gemini_uri) VALUES (?, ?, ?, ?, ?, ?)",
             (session_id, role, content, image_path, mime_type, gemini_uri)
         )
+
+# --- 4. ROUTES ---
+
+@app.get("/", response_class=HTMLResponse)
+async def get_home(request: Request, response: Response):
+    """
+    On first load, check for a cookie. If missing, generate one.
+    """
+    # Check if user already has a session cookie
+    session_id = request.cookies.get("session_id")
+    
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        
+    # Load history to render
+    chat_history_html = ""
+    
+    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.execute(
+            "SELECT role, content, image_path FROM messages WHERE session_id = ? ORDER BY id ASC", 
+            (session_id,)
+        )
+        rows = cursor.fetchall()
+        
+        for row in rows:
+            role = row["role"]
+            content = row["content"]
+            image_path = row["image_path"]
+
+            # Skip internal function messages (responses)
+            if role == "function":
+                continue
+                
+            # Skip model messages that are function calls (JSON)
+            if role == "model" and (content.strip().startswith('{"function_call":') or "function_call" in content[:50]):
+                continue
+
+            if role == "user":
+                chat_history_html += render_user_message(content, image_path)
+            else:
+                chat_history_html += render_bot_message(content)
+
+    # Fetch previous conversations
+    conversations = get_conversations()
+
+    response = templates.TemplateResponse("index.html", {
+        "request": request, 
+        "chat_history": chat_history_html,
+        "conversations": conversations,
+        "current_session_id": session_id
+    })
+    
+    # Set cookie if it was missing
+    if not request.cookies.get("session_id"):
+        response.set_cookie(key="session_id", value=session_id, max_age=31536000) # 1 year
+        
+    return response
+
+@app.post("/new-chat")
+async def new_chat(response: Response):
+    """Creates a new chat session."""
+    new_session_id = str(uuid.uuid4())
+    response = Response()
+    response.set_cookie(key="session_id", value=new_session_id, max_age=31536000)
+    response.headers["HX-Redirect"] = "/" # Redirect to home to reload sidebar and empty chat
+    return response
+
+@app.get("/load-chat/{session_id}")
+async def load_chat(session_id: str, response: Response):
+    """Loads a specific chat session."""
+    response = Response()
+    response.set_cookie(key="session_id", value=session_id, max_age=31536000)
+    response.headers["HX-Redirect"] = "/" # Redirect to home to reload everything
+    return response
+
 # Helper to render messages (DRY)
 def render_user_message(content: str, image_path: Optional[str] = None) -> str:
     image_html = ""
@@ -540,6 +670,256 @@ def get_coordinates(location: str):
     except Exception as e:
         return f"Error getting coordinates: {str(e)}"
 
+def get_weather(location: str):
+    """
+    Gets current weather information for a specific location using XWeather MCP server.
+    Use this tool when the user asks about weather, temperature, conditions,  etc.
+    
+    Args:
+        location (str): The location to get weather for (city name, address, etc.)
+    
+    Returns:
+        str: Current weather information for the location
+    """
+    try:
+        import requests
+        
+        # Get XWeather credentials from environment
+        xweather_id = os.getenv("XWEATHER_MCP_ID")
+        xweather_secret = os.getenv("XWEATHER_MCP_SECRET")
+        
+        if not xweather_id or not xweather_secret:
+            return "Error: XWeather API credentials not configured. Please set XWEATHER_MCP_ID and XWEATHER_MCP_SECRET in .env file."
+        
+        # MCP server endpoint
+        mcp_url = "https://mcp.api.xweather.com/mcp"
+        
+        # Prepare authorization (using client_id:client_secret format)
+        auth_string = f"{xweather_id}_{xweather_secret}"
+        
+        # Make request to MCP server
+        # The MCP server expects a JSON-RPC 2.0 request
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "xweather_get_current_weather",
+                "arguments": {
+                    "location": location
+                }
+            }
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {auth_string}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"
+        }
+        
+        response = requests.post(mcp_url, json=payload, headers=headers, timeout=10)
+        
+        print(f"XWeather API Status: {response.status_code}")
+        print(f"XWeather API Response: {response.text[:500]}")  # Print first 500 chars
+        
+        if response.status_code == 200:
+            try:
+                # The response is in SSE format, need to parse it
+                response_text = response.text
+                
+                # Extract JSON from SSE data field
+                if "data:" in response_text:
+                    # Split by lines and find the data line
+                    for line in response_text.split('\n'):
+                        if line.startswith('data:'):
+                            json_str = line[5:].strip()  # Remove 'data:' prefix
+                            data = json.loads(json_str)
+                            
+                            # Check for errors in the result
+                            if "result" in data:
+                                result = data["result"]
+                                if isinstance(result, dict) and result.get("isError"):
+                                    # Extract error message
+                                    if "content" in result and len(result["content"]) > 0:
+                                        error_text = result["content"][0].get("text", "Unknown error")
+                                        # Add helpful hint for invalid location errors
+                                        if "invalid" in error_text.lower() and "location" in error_text.lower():
+                                            error_text += "\n\nHint: Try specifying the location more precisely, e.g., 'Minneapolis, MN', 'London, UK', or use a zip code like '55401'."
+                                        return f"Weather service error: {error_text}"
+                                    return f"Weather service error: {result}"
+                                
+                                # Return successful result
+                                if "content" in result and len(result["content"]) > 0:
+                                    return result["content"][0].get("text", str(result))
+                                return str(result)
+                            else:
+                                return str(data)
+                    
+                    return f"Error: Could not parse SSE response: {response_text[:200]}"
+                else:
+                    # Try parsing as regular JSON
+                    data = response.json()
+                    if "result" in data:
+                        return str(data["result"])
+                    else:
+                        return str(data)
+                        
+            except json.JSONDecodeError as e:
+                print(f"JSON decode error: {e}")
+                print(f"Response content: {response.text}")
+                return f"Error: Received invalid JSON from XWeather API. Response: {response.text[:200]}"
+        else:
+            print(response.text)
+            return f"Error: XWeather API returned status {response.status_code}: {response.text}"
+            
+    except Exception as e:
+        return f"Error getting weather: {str(e)}"
+
+def get_forecast_weather(location: str):
+    """
+    Gets multi-day weather forecast for a specific location using XWeather MCP server.
+    Use this tool for planning, event scheduling, travel preparation, or when the user asks about future weather.
+    
+    Args:
+        location (str): The location to get forecast for (city, state/country, or zip code)
+    
+    Returns:
+        str: Multi-day weather forecast with temperatures, precipitation, wind, and conditions
+    """
+    try:
+        import requests
+        
+        xweather_id = os.getenv("XWEATHER_MCP_ID")
+        xweather_secret = os.getenv("XWEATHER_MCP_SECRET")
+        
+        if not xweather_id or not xweather_secret:
+            return "Error: XWeather API credentials not configured."
+        
+        mcp_url = "https://mcp.api.xweather.com/mcp"
+        auth_string = f"{xweather_id}_{xweather_secret}"
+        
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "xweather_get_forecast_weather",
+                "arguments": {
+                    "location": location
+                }
+            }
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {auth_string}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"
+        }
+        
+        response = requests.post(mcp_url, json=payload, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            response_text = response.text
+            if "data:" in response_text:
+                for line in response_text.split('\n'):
+                    if line.startswith('data:'):
+                        json_str = line[5:].strip()
+                        try:
+                            data = json.loads(json_str)
+                            
+                            if "result" in data:
+                                result = data["result"]
+                                if isinstance(result, dict) and result.get("isError"):
+                                    if "content" in result and len(result["content"]) > 0:
+                                        error_text = result["content"][0].get("text", "Unknown error")
+                                        if "invalid" in error_text.lower() and "location" in error_text.lower():
+                                            error_text += "\n\nHint: Try specifying the location more precisely, e.g., 'Minneapolis, MN', 'London, UK', or use a zip code."
+                                        return f"Weather service error: {error_text}"
+                                
+                                if "content" in result and len(result["content"]) > 0:
+                                    return result["content"][0].get("text", str(result))
+                                return str(result)
+                        except json.JSONDecodeError:
+                            pass
+                            
+                return f"Error: Could not parse forecast response"
+        else:
+            return f"Error: XWeather API returned status {response.status_code}"
+            
+    except Exception as e:
+        return f"Error getting forecast: {str(e)}"
+
+def get_precipitation_timing(location: str):
+    """
+    Gets timing information for upcoming precipitation (rain, snow, etc.) in the next hours to days.
+    Use this tool when the user asks "when will it rain?", "when will it stop raining?", or needs precipitation timing for outdoor activities.
+    
+    Args:
+        location (str): The location to get precipitation timing for (city, state/country, or zip code)
+    
+    Returns:
+        str: Start/stop timing and duration of upcoming precipitation
+    """
+    try:
+        import requests
+        
+        xweather_id = os.getenv("XWEATHER_MCP_ID")
+        xweather_secret = os.getenv("XWEATHER_MCP_SECRET")
+        
+        if not xweather_id or not xweather_secret:
+            return "Error: XWeather API credentials not configured."
+        
+        mcp_url = "https://mcp.api.xweather.com/mcp"
+        auth_string = f"{xweather_id}_{xweather_secret}"
+        
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "xweather_get_forecast_precipitation_timing",
+                "arguments": {
+                    "location": location
+                }
+            }
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {auth_string}",
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream"
+        }
+        
+        response = requests.post(mcp_url, json=payload, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            response_text = response.text
+            if "data:" in response_text:
+                for line in response_text.split('\n'):
+                    if line.startswith('data:'):
+                        json_str = line[5:].strip()
+                        data = json.loads(json_str)
+                        
+                        if "result" in data:
+                            result = data["result"]
+                            if isinstance(result, dict) and result.get("isError"):
+                                if "content" in result and len(result["content"]) > 0:
+                                    error_text = result["content"][0].get("text", "Unknown error")
+                                    if "invalid" in error_text.lower() and "location" in error_text.lower():
+                                        error_text += "\n\nHint: Try specifying the location more precisely, e.g., 'Minneapolis, MN', 'London, UK', or use a zip code."
+                                    return f"Weather service error: {error_text}"
+                            
+                            if "content" in result and len(result["content"]) > 0:
+                                return result["content"][0].get("text", str(result))
+                            return str(result)
+                        
+                return f"Error: Could not parse precipitation timing response"
+        else:
+            return f"Error: XWeather API returned status {response.status_code}"
+            
+    except Exception as e:
+        return f"Error getting precipitation timing: {str(e)}"
+
 # --- 4. ROUTES ---
 
 @app.get("/", response_class=HTMLResponse)
@@ -553,46 +933,6 @@ async def get_home(request: Request, response: Response):
     if not session_id:
         session_id = str(uuid.uuid4())
         
-    # Load history to render
-    history_items = get_history(session_id)
-    chat_history_html = ""
-    
-    # We need to fetch image_path for rendering history, so get_history should probably return it.
-    # But get_history returns formatted parts. Let's adjust get_history slightly or just query manually here?
-    # Actually get_history above was updated to return parts only.
-    # Let's update get_history to return the raw row data or handle rendering there?
-    # Better: Let's just query DB here for rendering to keep get_history clean for Gemini.
-    
-    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.execute(
-            "SELECT role, content, image_path FROM messages WHERE session_id = ? ORDER BY id ASC", 
-            (session_id,)
-        )
-        rows = cursor.fetchall()
-        
-    for row in rows:
-        role = row["role"]
-        content = row["content"]
-        image_path = row["image_path"]
-        
-        # Skip internal function messages
-        if role == "function":
-            continue
-            
-        # Skip model messages that are function calls (JSON)
-        if role == "model" and content.strip().startswith('{"function_call":'):
-            continue
-        
-        if role == "user":
-            chat_history_html += render_user_message(content, image_path)
-        else:
-            chat_history_html += render_bot_message(content)
-
-    resp = templates.TemplateResponse("index.html", {"request": request, "chat_history": chat_history_html})
-    # Set the cookie on the browser so it remembers us
-    resp.set_cookie(key="session_id", value=session_id)
-    return resp
 
 @app.post("/chat", response_class=HTMLResponse)
 async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile = File(None)):
@@ -769,6 +1109,15 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
 
                 tools.append(get_coordinates)
                 current_instruction += "\n\nYou have access to a 'get_coordinates' tool. Use it to find the latitude and longitude of locations."
+
+                tools.append(get_weather)
+                current_instruction += "\n\nYou have access to a 'get_weather' tool. Use it when the user asks about current weather, temperature, or conditions for any location."
+
+                tools.append(get_forecast_weather)
+                current_instruction += "\n\nYou have access to a 'get_forecast_weather' tool. Use it for multi-day weather forecasts, planning, event scheduling, or when the user asks about future weather."
+
+                tools.append(get_precipitation_timing)
+                current_instruction += "\n\nYou have access to a 'get_precipitation_timing' tool. Use it when the user asks 'when will it rain?', 'when will it stop raining?', or needs precipitation timing information."
             else:
                 # When files are present, clear history to avoid API compatibility issues
                 # Keep only the current message (last one in payload)
@@ -899,6 +1248,12 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             api_response = get_user_timezone()
                         elif fn_name == "get_coordinates":
                             api_response = get_coordinates(fn_args.get("location"))
+                        elif fn_name == "get_weather":
+                            api_response = get_weather(fn_args.get("location"))
+                        elif fn_name == "get_forecast_weather":
+                            api_response = get_forecast_weather(fn_args.get("location"))
+                        elif fn_name == "get_precipitation_timing":
+                            api_response = get_precipitation_timing(fn_args.get("location"))
                         else:
                             api_response = f"Error: Unknown tool '{fn_name}'"
                             
