@@ -72,14 +72,16 @@ def get_system_instruction() -> str:
     if os.path.exists(SYSTEM_INSTRUCTION_FILE):
         with open(SYSTEM_INSTRUCTION_FILE, "r") as f:
             return f.read().strip()
-    return """you are a helpfull AI assistant and you:
-- always offer follow up actions,
+    instruction = """you are a helpfull AI assistant and you:
+- offer specific follow up actions, no general suggestions like "Would you like to know anything else?" 
 - use metric system for measurements,
 - use Centigrade for temperature,   
-- my location is : "Zeist, The Netherlands".  use that location for any queries that relate to the 'implied' current location of the user (i.e. 'here') when approximate or precise location is needed to answer the question,
-- when using the execute_calculation tool, offer the the user to show the code that was used for the calculation,
+- my location is : "Utrecht, The Netherlands".  use that location for any queries that relate to the 'implied' current location of the user (i.e. 'here') when approximate or precise location is needed to answer the question,
 - when using the search_web tool remember the urls of the sources that were found, and offer to provide them,
-- when providing a URL make sure it's clickable, with target being a new tab"""
+- when providing a URL make sure it's clickable, with target being a new tab
+- do not offer to show the code used by either execute_calculation or generate_chart tools"""
+    save_system_instruction(instruction)
+    return instruction
 
 def save_system_instruction(instruction: str):
     with open(SYSTEM_INSTRUCTION_FILE, "w") as f:
@@ -359,13 +361,88 @@ async def get_home(request: Request, response: Response):
             content = row["content"]
             image_path = row["image_path"]
 
-            # Skip internal function messages (responses)
+            # Handle internal function responses
             if role == "function":
+                try:
+                    fr_data = json.loads(content)
+                    fn_name = fr_data.get("function_response", {}).get("name", "")
+                    fn_response = fr_data.get("function_response", {}).get("response", {}).get("result", "")
+                    
+                    # Render sources for search_web
+                    if fn_name == "search_web":
+                        try:
+                            # The result itself is a JSON string containing context and sources
+                            search_data = json.loads(fn_response)
+                            sources = search_data.get("sources", [])
+                            
+                            if sources:
+                                chat_history_html += """
+                                <div class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                                    <details class="group">
+                                        <summary class="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                                            <span class="transition group-open:rotate-90">▶</span>
+                                            <span>🔍 Sources used for web search</span>
+                                        </summary>
+                                        <div class="mt-3 space-y-2">
+                                """
+                                
+                                for idx, source in enumerate(sources, 1):
+                                    url = source.get('url', '')
+                                    title = source.get('title', url)
+                                    chat_history_html += f"""
+                                    <div class="flex items-start gap-2 text-sm">
+                                        <span class="text-gray-500 dark:text-gray-400 font-mono">{idx}.</span>
+                                        <a href="{url}" target="_blank" rel="noopener noreferrer" 
+                                           class="text-blue-600 dark:text-blue-400 hover:underline flex-1 break-all">
+                                            {title}
+                                        </a>
+                                    </div>
+                                    """
+                                
+                                chat_history_html += """
+                                        </div>
+                                    </details>
+                                </div>
+                                """
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                except json.JSONDecodeError:
+                    pass
+                
+                # Continue skipping rendering the raw content for all function responses
                 continue
                 
-            # Skip model messages that are function calls (JSON)
+            # Handle model messages that are function calls
             if role == "model" and (content.strip().startswith('{"function_call":') or "function_call" in content[:50]):
-                continue
+                try:
+                    # Parse the function call JSON
+                    fc_data = json.loads(content)
+                    fn_name = fc_data.get("function_call", {}).get("name", "")
+                    fn_args = fc_data.get("function_call", {}).get("args", {})
+                    
+                    # Only render code execution function calls
+                    if fn_name in ["execute_calculation", "generate_chart"]:
+                        code = fn_args.get("code", "")
+                        if code:
+                            # Render as a collapsible code block
+                            chat_history_html += f"""
+                            <div class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                                <details class="group">
+                                    <summary class="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                                        <span class="transition group-open:rotate-90">▶</span>
+                                        <span>🔧 Code executed via <code class="text-xs bg-gray-200 dark:bg-gray-700 px-2 py-1 rounded">{fn_name}</code></span>
+                                    </summary>
+                                    <div class="mt-3">
+                                        <pre class="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm"><code class="language-python">{code}</code></pre>
+                                    </div>
+                                </details>
+                            </div>
+                            """
+                    # Skip other function calls (search_web, get_weather, etc.)
+                    continue
+                except json.JSONDecodeError:
+                    # If JSON parsing fails, skip this message
+                    continue
 
             if role == "user":
                 chat_history_html += render_user_message(content, image_path)
@@ -641,12 +718,19 @@ def search_web(query: str):
     try:
         print(f"Searching web for: {query}")
         response = tavily_client.search(query=query, search_depth="basic")
+        results = response.get('results', [])[:3]  # Limit to top 3
+        
         # Format results for the model
         context = "\n".join([
             f"Source: {result['url']}\nContent: {result['content']}" 
-            for result in response.get('results', [])[:3] # Limit to top 3
+            for result in results
         ])
-        return context
+        
+        # Return JSON with both context and sources for display
+        return json.dumps({
+            "context": context,
+            "sources": [{"url": r['url'], "title": r.get('title', r['url'])} for r in results]
+        })
     except Exception as e:
         return f"Error performing search: {str(e)}"
 
@@ -1480,6 +1564,69 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             }
                         })
                         save_message(session_id, "model", fc_json)
+                        
+                        # Display code block for code execution tools
+                        if fn_name in ["execute_calculation", "generate_chart"]:
+                            code = fn_args.get("code", "")
+                            if code:
+                                # Use OOB swap to insert the code block before the streaming response
+                                code_html = f"""
+                                <div id="code-block-{stream_id}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                                    <details class="group">
+                                        <summary class="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                                            <span class="transition group-open:rotate-90">▶</span>
+                                            <span>🔧 Code executed via <code class="text-xs bg-gray-200 dark:bg-gray-700 px-2 py-1 rounded">{fn_name}</code></span>
+                                        </summary>
+                                        <div class="mt-3">
+                                            <pre class="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm"><code class="language-python">{code}</code></pre>
+                                        </div>
+                                    </details>
+                                </div>
+                                """
+                                yield format_sse(code_html)
+                        
+                        # Display sources block for search_web tool
+                        if fn_name == "search_web":
+                            try:
+                                # Parse the JSON response to extract sources
+                                search_data = json.loads(api_response)
+                                sources = search_data.get("sources", [])
+                                if sources:
+                                    sources_html = """
+                                    <div id="sources-block-{stream_id}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                                        <details class="group">
+                                            <summary class="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                                                <span class="transition group-open:rotate-90">▶</span>
+                                                <span>🔍 Sources used for web search</span>
+                                            </summary>
+                                            <div class="mt-3 space-y-2">
+                                    """.format(stream_id=stream_id)
+                                    
+                                    for idx, source in enumerate(sources, 1):
+                                        url = source.get('url', '')
+                                        title = source.get('title', url)
+                                        sources_html += f"""
+                                        <div class="flex items-start gap-2 text-sm">
+                                            <span class="text-gray-500 dark:text-gray-400 font-mono">{idx}.</span>
+                                            <a href="{url}" target="_blank" rel="noopener noreferrer" 
+                                               class="text-blue-600 dark:text-blue-400 hover:underline flex-1 break-all">
+                                                {title}
+                                            </a>
+                                        </div>
+                                        """
+                                    
+                                    sources_html += """
+                                            </div>
+                                        </details>
+                                    </div>
+                                    """
+                                    yield format_sse(sources_html)
+                                
+                                # Extract just the context for the model
+                                api_response = search_data.get("context", api_response)
+                            except json.JSONDecodeError:
+                                # If not JSON, use as-is (error message)
+                                pass
                         
                         # 2. Add the function response
                         messages_payload.append({

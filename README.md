@@ -35,6 +35,10 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
     *   **Timezone Awareness:** Automatically detects user timezone from IP address, with manual override support.
     *   **Date/Time:** Get current time in user's timezone or any specified timezone.
     *   **Location Services:** Find coordinates for locations using geopy.
+
+*   **Transparent Tool Execution:**
+    *   **Code Display:** View the actual Python code executed for calculations and charts in a collapsible block.
+    *   **Sources Display:** View a list of web sources used for search queries with clickable links.
 *   **Robust Error Handling:** Gracefully handles API quota limits, token limits, and empty responses with automatic retries and user notifications.
 
 ## Prerequisites
