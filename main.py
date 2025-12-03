@@ -666,7 +666,7 @@ def render_bot_message(content: str, stream_id: Optional[str] = None, final: boo
              sse-connect="/stream?prompt={urllib.parse.quote(content)}&stream_id={stream_id}" 
              sse-swap="message" 
              class="flex justify-start mb-4 animate-fade-in">
-            <div class="bg-white border border-gray-100 text-gray-800 px-5 py-4 rounded-2xl rounded-tl-sm max-w-[90%] shadow-sm prose prose-sm prose-blue max-w-none">
+            <div class="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 text-gray-800 dark:text-gray-100 px-5 py-4 rounded-2xl rounded-tl-sm max-w-[90%] shadow-sm prose prose-sm prose-blue dark:prose-invert max-w-none">
                 <span id="cursor" class="inline-block w-2 h-5 bg-blue-500 cursor-blink align-middle"></span>
             </div>
         </div>
@@ -682,7 +682,7 @@ def render_bot_message(content: str, stream_id: Optional[str] = None, final: boo
         <div id="{stream_id}" 
              hx-swap-oob="outerHTML:#{stream_id}" 
              class="flex justify-start mb-4">
-            <div class="bg-white border border-gray-100 text-gray-800 px-5 py-4 rounded-2xl rounded-tl-sm max-w-[90%] shadow-sm prose prose-sm prose-blue max-w-none">
+            <div class="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 text-gray-800 dark:text-gray-100 px-5 py-4 rounded-2xl rounded-tl-sm max-w-[90%] shadow-sm prose prose-sm prose-blue dark:prose-invert max-w-none">
                 {html_content}
             </div>
         </div>
@@ -691,7 +691,7 @@ def render_bot_message(content: str, stream_id: Optional[str] = None, final: boo
     # Just static HTML (for history)
     return f"""
     <div class="flex justify-start mb-4">
-        <div class="bg-white border border-gray-100 text-gray-800 px-5 py-4 rounded-2xl rounded-tl-sm max-w-[90%] shadow-sm prose prose-sm prose-blue max-w-none">
+        <div class="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 text-gray-800 dark:text-gray-100 px-5 py-4 rounded-2xl rounded-tl-sm max-w-[90%] shadow-sm prose prose-sm prose-blue dark:prose-invert max-w-none">
             {html_content}
         </div>
     </div>
