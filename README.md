@@ -39,6 +39,9 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 *   **Transparent Tool Execution:**
     *   **Code Display:** View the actual Python code executed for calculations and charts in a collapsible block.
     *   **Sources Display:** View a list of web sources used for search queries with clickable links.
+*   **Actionable Follow-up Suggestions:**
+    *   The AI automatically provides relevant follow-up questions or actions as clickable chips.
+    *   Clicking a suggestion automatically submits it to the chat.
 *   **Robust Error Handling:** Gracefully handles API quota limits, token limits, and empty responses with automatic retries and user notifications.
 
 ## Prerequisites

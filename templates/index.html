@@ -274,7 +274,8 @@
 						</svg>
 					</button>
 
-					<input type="text" name="prompt" placeholder="Type your message..." required autocomplete="off"
+					<input type="text" id="chat-input" name="prompt" placeholder="Type your message..." required
+						autocomplete="off"
 						class="w-full pl-4 pr-12 py-3.5 bg-gray-50 dark:bg-gray-700 border border-gray-200 dark:border-gray-600 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 dark:focus:border-blue-400 transition-all text-gray-700 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500">
 
 					<button type="submit"
@@ -479,6 +480,20 @@
 		document.body.addEventListener('htmx:sseMessage', function (evt) {
 			setTimeout(smartScroll, 100);
 		});
+
+		// Helper to set input value from suggestion chips
+		function setInput(text) {
+			const input = document.getElementById('chat-input');
+			if (input) {
+				input.value = text;
+				input.focus();
+				// Auto-submit the form
+				const form = input.closest('form');
+				if (form) {
+					htmx.trigger(form, 'submit');
+				}
+			}
+		}
 	</script>
 </body>
 

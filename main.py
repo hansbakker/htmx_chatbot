@@ -91,7 +91,9 @@ def get_system_instruction() -> str:
 - my location is : "Utrecht, The Netherlands".  use that location for any queries that relate to the 'implied' current location of the user (i.e. 'here') when approximate or precise location is needed to answer the question,
 - when using the search_web tool remember the urls of the sources that were found, and offer to provide them,
 - when providing a URL make sure it's clickable, with target being a new tab
-- do not offer to show the code used by either execute_calculation or generate_chart tools"""
+- do not offer to show the code used by either execute_calculation or generate_chart tools
+- if you have actionable follow-up suggestions, append them to the very end of your response as a JSON object with the key 'suggestions', like this: {"suggestions": ["Action 1", "Action 2"]}. Do not wrap this in markdown code blocks. Make sure it is the last thing in your response.
+"""
     save_system_instruction(instruction)
     return instruction
 
@@ -344,7 +346,7 @@ def save_message(session_id: str, role: str, content: str, image_path: Optional[
             (session_id, role, content, image_path, mime_type, gemini_uri)
         )
 
-# --- 4. ROUTES ---
+# --- 3. ROUTES ---
 
 @app.get("/", response_class=HTMLResponse)
 async def get_home(request: Request, response: Response):
@@ -494,7 +496,7 @@ async def load_chat(session_id: str, response: Response):
     response.headers["HX-Redirect"] = "/" # Redirect to home to reload everything
     return response
 
-# --- Helper Functions for Rendering ---
+# --- 4. Helper Functions for Rendering ---
 
 def render_sidebar_html(current_session_id: str) -> str:
     """Renders the sidebar chat list HTML."""
@@ -669,7 +671,23 @@ def render_user_message(content: str, image_path: Optional[str] = None) -> str:
     </div>
     """
 
-def render_bot_message(content: str, stream_id: Optional[str] = None, final: bool = False) -> str:
+def render_bot_message(content: str, stream_id: Optional[str] = None, final: bool = False, suggestions: List[str] = None) -> str:
+    # Extract suggestions from content if not provided
+    if suggestions is None:
+        import re
+        # Look for JSON block at the end
+        match = re.search(r'\{\s*"suggestions"\s*:\s*\[(.*?)\]\s*\}\s*$', content, re.DOTALL)
+        if match:
+            json_str = match.group(0)
+            try:
+                data = json.loads(json_str)
+                if "suggestions" in data and isinstance(data["suggestions"], list):
+                    suggestions = data["suggestions"]
+                    # Remove the JSON block from the content to be displayed
+                    content = content.replace(json_str, "").strip()
+            except json.JSONDecodeError:
+                pass
+
     # If it's a stream placeholder
     if stream_id and not final:
         return f"""
@@ -688,6 +706,20 @@ def render_bot_message(content: str, stream_id: Optional[str] = None, final: boo
     # Enable tables extension
     html_content = markdown.markdown(content, extensions=['fenced_code', 'tables'])
     
+    suggestions_html = ""
+    if suggestions:
+        suggestions_html = '<div class="mt-3 flex flex-wrap gap-2">'
+        for suggestion in suggestions:
+            # Escape quotes in suggestion for onclick attribute
+            safe_suggestion = suggestion.replace("'", "\\'")
+            suggestions_html += f"""
+            <button onclick="setInput('{safe_suggestion}')" 
+                class="text-xs bg-blue-50 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300 px-3 py-1.5 rounded-full border border-blue-100 dark:border-blue-800 hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors cursor-pointer">
+                {suggestion}
+            </button>
+            """
+        suggestions_html += '</div>'
+    
     # If it's an OOB swap update
     if stream_id and final:
         return f"""
@@ -696,6 +728,7 @@ def render_bot_message(content: str, stream_id: Optional[str] = None, final: boo
              class="flex justify-start mb-4">
             <div class="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 text-gray-800 dark:text-gray-100 px-5 py-4 rounded-2xl rounded-tl-sm max-w-[90%] shadow-sm prose prose-sm prose-blue dark:prose-invert max-w-none">
                 {html_content}
+                {suggestions_html}
             </div>
         </div>
         """
@@ -705,6 +738,7 @@ def render_bot_message(content: str, stream_id: Optional[str] = None, final: boo
     <div class="flex justify-start mb-4">
         <div class="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 text-gray-800 dark:text-gray-100 px-5 py-4 rounded-2xl rounded-tl-sm max-w-[90%] shadow-sm prose prose-sm prose-blue dark:prose-invert max-w-none">
             {html_content}
+            {suggestions_html}
         </div>
     </div>
     """
@@ -717,7 +751,7 @@ def format_sse(data: str, event: str = "message") -> str:
     msg += "\n"
     return msg
 
-# --- 3. TOOLS ---
+# --- 5. TOOLS ---
 def import_package(package_name,install=True):
     """
     Checks if a package is installed. If not, installs it via pip
@@ -755,15 +789,15 @@ def write_source_code(file_path: str, code: str):
     Writes the file containing the source code to the specified path.
     Use this tool when you need to write the source code of a file.
     Args:
-        file_path (str): The path to the file to write.This may only be "main.py", if not an error message is returned.
+        file_path (str): The path to the file to write.This may NOT be "main.py", if not an error message is returned.
         code (str): String containing the modified source code to write to the file.
 
     Returns:
         str: success or error message
     """
     try:
-        if file_path=="main.py":
-            with open(file_path, 'w') as f:
+        if file_path!="main.py":
+            with open("./static/generated_code"+file_path, 'w') as f:
                 print(f"Writing file {file_path}")
                 f.write(code)
                 return f"Successfully wrote file {file_path}"
@@ -777,14 +811,14 @@ def read_source_code(file_path: str):
     Reads the contents of a source code file and returns it as a string.
     Use this tool when you need to read the source code of a file.
     Args:
-        file_path (str): The path to the file to read. This may only be "main.py", if not an error message is returned.
+        file_path (str): The path to the file to read. This may NOT be "main.py", if not an error message is returned.
 
     Returns:
         str: String with the entire contents of the source code.
     """
     try:
-        if file_path=="main.py":
-            with open(file_path, 'r') as f:
+        if file_path!="main.py":
+            with open("./static/generated_code"+file_path, 'r') as f:
                 print(f"Reading file {file_path}")
                 code = f.read()
                 return code
@@ -1470,16 +1504,16 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                     current_instruction += "\n\nYou have access to a 'search_web' tool. You must use it whenever the user asks for current information, news, or facts you don't know. Do NOT invent new tools. Only use 'search_web' for searching."
                 
                 tools.append(read_source_code)
-                current_instruction += "\n\nYou have access to a 'read_source_code' tool. Use it for reading your own source code (main.py). It returns TEXT output. It CANNOT generate images."
+                current_instruction += "\n\nYou have access to a 'read_source_code' tool. Use it for reading your own source code files. It returns TEXT output. It CANNOT generate images."
                 
                 tools.append(write_source_code)
-                current_instruction += "\n\nYou have access to a 'write_source_code' tool. Use it for writing your own (modified) source code (main.py) to file. It returns TEXT output. It CANNOT generate images."
+                current_instruction += "\n\nYou have access to a 'write_source_code' tool. Use it for writing (modified) source code to file. It returns TEXT output. It CANNOT generate images."
 
                 tools.append(import_package)
                 current_instruction += "\n\nYou have access to an 'import_package' tool. Use it for checking if a package is installed (install=False) or installing and importing directly (install=True). It returns TEXT output. It CANNOT generate images. It can also just check if a package is installed"
                 
                 tools.append(execute_calculation)
-                current_instruction += "\n\nYou have access to an 'execute_calculation' tool. Use it for math, logic, text processing, or data analysis (numpy/pandas). It returns TEXT output. It CANNOT generate images."
+                current_instruction += "\n\nYou have access to an 'execute_calculation' tool. Use it for math, logic, text processing, or data analysis (numpy/pandas) or any arbitray python code executions. It returns TEXT output. It CANNOT generate images."
 
                 tools.append(generate_chart)
                 current_instruction += "\n\nYou have access to a 'generate_chart' tool. **CRITICAL**: You MUST use this tool for ANY visualization request (charts, graphs, plots, diagrams). DO NOT provide Python code to the user. DO NOT use execute_calculation for charts. ALWAYS call 'generate_chart' when the user asks for any kind of visual representation of data. If you provide code instead of calling the tool, you have FAILED."
