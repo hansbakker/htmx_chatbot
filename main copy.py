@@ -1462,12 +1462,9 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 if tavily_client:
                     tools.append(search_web)
                     current_instruction += "\n\nYou have access to a 'search_web' tool. You must use it whenever the user asks for current information, news, or facts you don't know. Do NOT invent new tools. Only use 'search_web' for searching."
-                tools.append(read_source_code)
-                current_instruction += "\n\nYou have access to a 'read_source_code' tool. Use it for reading your own source code (main.py). It returns TEXT output. It CANNOT generate images."
+                tools.append(modify_source_code)
+                current_instruction += "\n\nYou have access to a 'modify_source_code' tool. Use it for modifying your source code. It returns TEXT output. It CANNOT generate images."
                 
-                tools.append(write_source_code)
-                current_instruction += "\n\nYou have access to a 'write_source_code' tool. Use it for writing your own (modified) source code (main.py). It returns TEXT output. It can only be used after a 'read_source_code' call. It CANNOT generate images."
-
                 tools.append(import_package)
                 current_instruction += "\n\nYou have access to an 'import_package' tool. Use it for checking if a package is installed (install=False) or installing and importing directly (install=True). It returns TEXT output. It CANNOT generate images. It can also just check if a package is installed"
                 
