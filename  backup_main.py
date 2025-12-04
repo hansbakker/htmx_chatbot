@@ -723,7 +723,7 @@ def import_package(package_name,install=True):
     Checks if a package is installed. If not, installs it via pip
     and then imports it.
     Use this tool when you need to use a specific package, that is not installed to solve a problem involving the execution of code.
-    Use this tool also when you only want to check if a package is installed, but not want to install when it's not installed (install=False).
+    Use this tool also when you only want to check if a package is installed, but for a good reason you do not want to install when it's not installed (install=False).
     Args:
         package_name (str): The name of the package on PyPI (e.g., "PyYAML").
         install (bool): Whether to install the package if it is not installed. Default is True.
@@ -763,6 +763,7 @@ def write_source_code(file_path: str, code: str):
     """
     try:
         with open(file_path, 'w') as f:
+            print(f"Writing file {file_path}")
             f.write(code)
             return f"Successfully wrote file {file_path}"
     except Exception as e:
@@ -1462,9 +1463,12 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 if tavily_client:
                     tools.append(search_web)
                     current_instruction += "\n\nYou have access to a 'search_web' tool. You must use it whenever the user asks for current information, news, or facts you don't know. Do NOT invent new tools. Only use 'search_web' for searching."
-                tools.append(modify_source_code)
-                current_instruction += "\n\nYou have access to a 'modify_source_code' tool. Use it for modifying your source code. It returns TEXT output. It CANNOT generate images."
+                tools.append(read_source_code)
+                current_instruction += "\n\nYou have access to a 'read_source_code' tool. Use it for reading your own source code (main.py). It returns TEXT output. It CANNOT generate images."
                 
+                tools.append(write_source_code)
+                current_instruction += "\n\nYou have access to a 'write_source_code' tool. Use it for writing your own (modified) source code (main.py). It returns TEXT output. It can not be used if you have not used 'read_source_code' before. It CANNOT generate images."
+
                 tools.append(import_package)
                 current_instruction += "\n\nYou have access to an 'import_package' tool. Use it for checking if a package is installed (install=False) or installing and importing directly (install=True). It returns TEXT output. It CANNOT generate images. It can also just check if a package is installed"
                 
@@ -1611,8 +1615,10 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                         # Execute tool
                         if fn_name == "search_web":
                             api_response = search_web(fn_args.get("query"))
-                        elif fn_name == "modify_source_code":
-                            api_response = modify_source_code()
+                        elif fn_name == "read_source_code":
+                            api_response = read_source_code(fn_args.get("file_path"))
+                        elif fn_name == "write_source_code":
+                            api_response = write_source_code(fn_args.get("file_path"), fn_args.get("code"))
                         elif fn_name == "import_package":
                             api_response = import_package(fn_args.get("package_name"))
                         elif fn_name == "execute_calculation":

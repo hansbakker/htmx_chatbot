@@ -723,7 +723,7 @@ def import_package(package_name,install=True):
     Checks if a package is installed. If not, installs it via pip
     and then imports it.
     Use this tool when you need to use a specific package, that is not installed to solve a problem involving the execution of code.
-    Use this tool also when you only want to check if a package is installed, but not want to install when it's not installed (install=False).
+    Use this tool also when you only want to check if a package is installed, but for a good reason you do not want to install when it's not installed (install=False).
     Args:
         package_name (str): The name of the package on PyPI (e.g., "PyYAML").
         install (bool): Whether to install the package if it is not installed. Default is True.
@@ -752,38 +752,44 @@ def import_package(package_name,install=True):
 
 def write_source_code(file_path: str, code: str):
     """
-    Writes the source code of a file
+    Writes the file containing the source code to the specified path.
     Use this tool when you need to write the source code of a file.
     Args:
-        file_path (str): The path to the file to write.
-        code (str): The modified source code to write.
+        file_path (str): The path to the file to write.This may only be "main.py", if not an error message is returned.
+        code (str): String containing the modified source code to write to the file.
 
     Returns:
         str: success or error message
     """
     try:
-        with open(file_path, 'w') as f:
-            f.write(code)
-            return f"Successfully wrote file {file_path}"
+        if file_path=="main.py":
+            with open(file_path, 'w') as f:
+                print(f"Writing file {file_path}")
+                f.write(code)
+                return f"Successfully wrote file {file_path}"
+        else:
+            return f"Target file name not allowed: {file_path}"    
     except Exception as e:
         return f"Error writing file {file_path}: {e}"  
 
 def read_source_code(file_path: str):
     """
-    Reads the source code of a file and returns it as a string.
+    Reads the contents of a source code file and returns it as a string.
     Use this tool when you need to read the source code of a file.
     Args:
-        file_path (str): The path to the file to read.
+        file_path (str): The path to the file to read. This may only be "main.py", if not an error message is returned.
 
     Returns:
-        str: The source code of the file.
+        str: String with the entire contents of the source code.
     """
     try:
-        with open(file_path, 'r') as f:
-            code = f.read()
-            write_source_code(" backup_"+file_path, code)
-            return code
-        
+        if file_path=="main.py":
+            with open(file_path, 'r') as f:
+                print(f"Reading file {file_path}")
+                code = f.read()
+                return code
+        else:
+            return f"Source code file name not allowed: {file_path}"   
     except Exception as e:
         return f"Error reading file {file_path}: {e}"
 
@@ -1462,11 +1468,12 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 if tavily_client:
                     tools.append(search_web)
                     current_instruction += "\n\nYou have access to a 'search_web' tool. You must use it whenever the user asks for current information, news, or facts you don't know. Do NOT invent new tools. Only use 'search_web' for searching."
+                
                 tools.append(read_source_code)
                 current_instruction += "\n\nYou have access to a 'read_source_code' tool. Use it for reading your own source code (main.py). It returns TEXT output. It CANNOT generate images."
                 
                 tools.append(write_source_code)
-                current_instruction += "\n\nYou have access to a 'write_source_code' tool. Use it for writing your own (modified) source code (main.py). It returns TEXT output. It can only be used after a 'read_source_code' call. It CANNOT generate images."
+                current_instruction += "\n\nYou have access to a 'write_source_code' tool. Use it for writing your own (modified) source code (main.py) to file. It returns TEXT output. It CANNOT generate images."
 
                 tools.append(import_package)
                 current_instruction += "\n\nYou have access to an 'import_package' tool. Use it for checking if a package is installed (install=False) or installing and importing directly (install=True). It returns TEXT output. It CANNOT generate images. It can also just check if a package is installed"
@@ -1614,8 +1621,10 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                         # Execute tool
                         if fn_name == "search_web":
                             api_response = search_web(fn_args.get("query"))
-                        elif fn_name == "modify_source_code":
-                            api_response = modify_source_code()
+                        elif fn_name == "read_source_code":
+                            api_response = read_source_code(fn_args.get("file_path"))
+                        elif fn_name == "write_source_code":
+                            api_response = write_source_code(fn_args.get("file_path"), fn_args.get("code"))
                         elif fn_name == "import_package":
                             api_response = import_package(fn_args.get("package_name"))
                         elif fn_name == "execute_calculation":
