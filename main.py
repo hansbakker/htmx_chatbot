@@ -59,9 +59,8 @@ RETRY_PHRASES = [
     "bear with me",
     "i'll proceed",
     "i will proceed",
-    "i'll get that",
     "i'll get",
-    "i will get that",
+    "i will get",
     "i'll wait",
     "i will wait",
     "i'll stop",
@@ -887,6 +886,59 @@ def search_web(query: str):
         return f"Error performing search: {str(e)}"
 
 
+def crawl_website(url: str, max_depth: int = 2, limit: int = 10, instructions: str = None):
+    """
+    Crawls a website starting from the given URL to extract content from multiple pages.
+    Use this tool when you need to gather information from multiple pages of a website,
+    or when you need to explore a website's structure and content.
+    
+    Args:
+        url (str): The starting URL to crawl from.
+        max_depth (int): How deep to crawl (number of link levels to follow). Default is 2.
+        limit (int): Maximum number of pages to crawl. Default is 10.
+        instructions (str): Optional instructions to filter which pages to include (e.g., "Find all pages about pricing").
+    
+    Returns:
+        str: JSON with crawled content and sources.
+    """
+    if not tavily_client:
+        return "Error: Web crawl is not configured (missing API key)."
+    
+    try:
+        print(f"Crawling website: {url} (depth={max_depth}, limit={limit})")
+        
+        # Build crawl parameters
+        crawl_params = {
+            "url": url,
+            "max_depth": max_depth,
+            "limit": limit
+        }
+        if instructions:
+            crawl_params["instructions"] = instructions
+        
+        response = tavily_client.crawl(**crawl_params)
+        results = response.get('results', [])
+        
+        # Format results for the model
+        context_parts = []
+        sources = []
+        for result in results:
+            page_url = result.get('url', url)
+            raw_content = result.get('raw_content', '')[:2000]  # Limit content per page
+            context_parts.append(f"Page: {page_url}\nContent: {raw_content}")
+            sources.append({"url": page_url, "title": result.get('title', page_url)})
+        
+        context = "\n\n---\n\n".join(context_parts)
+        
+        # Return JSON with both context and sources for display
+        return json.dumps({
+            "context": context,
+            "sources": sources,
+            "pages_crawled": len(results)
+        })
+    except Exception as e:
+        return f"Error crawling website: {str(e)}"
+
 def execute_calculation(code: str):
     """
     Executes Python code for calculations, logic, and text processing.
@@ -1526,11 +1578,13 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                     if has_file_in_context:
                         break
 
-            # Only add tools if NO file is present (Gemini API limitation)
             if not has_file_in_context:
                 if tavily_client:
                     tools.append(search_web)
                     current_instruction += "\n\n- You have access to a 'search_web' tool. You must use it whenever the user asks for current information, news, or facts you don't know. Do NOT invent new tools. Only use 'search_web' for searching."
+                    
+                    tools.append(crawl_website)
+                    current_instruction += "\n\n- You have access to a 'crawl_website' tool. Use it when you need to gather content from multiple pages of a specific website, explore a site's structure, or extract information from specific URLs. Parameters: url (required), max_depth (default 2), limit (default 10), instructions (optional filter)."
                 
                 tools.append(read_source_code)
                 current_instruction += "\n\n- You have access to a 'read_source_code' tool. Use it for reading your own source code files. It returns TEXT output. It CANNOT generate images."
@@ -1580,8 +1634,6 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             current_instruction += """\n\n- if you have actionable follow-up suggestions, append them to the very end of your response as a JSON object with the key 'suggestions', like this: {"suggestions": ["Action 1", "Action 2"]}. Do not wrap this in markdown code blocks. Make sure it is the last thing in your response."""
             current_instruction += """\n\n- when providing a URL make sure it's clickable, with target being a new tab"""
             current_instruction += """\n\n- when using search_web tool, remember the urls that were used"""
-            current_instruction += """\n\n- when a tool call fails or produces an error, do NOT say "let me try again" or "please wait" - instead, immediately call the tool again with corrected parameters in the SAME response. Do not wait for user confirmation."""
-            current_instruction += """\n\n- if you end your response with something you are going to do, like: "I'll get that chart ready for you now" or "I'll get that image ready for you now", do not wait for user confirmation but proceed as if the user replied with "OK". """
             
             # Debug: Print registered tools
             tool_names = [t.__name__ if hasattr(t, '__name__') else str(t) for t in tools]
@@ -1697,6 +1749,13 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             # Execute tool
                             if fn_name == "search_web":
                                 api_response = search_web(fn_args.get("query"))
+                            elif fn_name == "crawl_website":
+                                api_response = crawl_website(
+                                    fn_args.get("url"),
+                                    fn_args.get("max_depth", 2),
+                                    fn_args.get("limit", 10),
+                                    fn_args.get("instructions")
+                                )
                             elif fn_name == "read_source_code":
                                 api_response = read_source_code(fn_args.get("file_path"))
                             elif fn_name == "write_source_code":
@@ -1795,8 +1854,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                     """
                                     yield format_sse(code_html)
                             
-                            # Display sources block for search_web tool
-                            if fn_name == "search_web":
+                            # Display sources block for search_web and crawl_website tools
+                            if fn_name in ["search_web", "crawl_website"]:
                                 # Store original response BEFORE we modify api_response
                                 original_api_response = api_response
                                 try:
@@ -1804,15 +1863,16 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                     search_data = json.loads(api_response)
                                     sources = search_data.get("sources", [])
                                     if sources:
-                                        sources_html = """
+                                        source_label = "🔍 Sources used for web search" if fn_name == "search_web" else "🕸️ Pages crawled from website"
+                                        sources_html = f"""
                                         <div id="sources-block-{stream_id}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
                                             <details class="group">
                                                 <summary class="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
                                                     <span class="transition group-open:rotate-90">▶</span>
-                                                    <span>🔍 Sources used for web search</span>
+                                                    <span>{source_label}</span>
                                                 </summary>
                                                 <div class="mt-3 space-y-2">
-                                        """.format(stream_id=stream_id)
+                                        """
                                         
                                         for idx, source in enumerate(sources, 1):
                                             url = source.get('url', '')
@@ -1852,9 +1912,9 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             })
                             
                             # SAVE FUNCTION RESPONSE TO DB
-                            # For search_web, save the ORIGINAL full response (with sources) to the DB
+                            # For search_web and crawl_website, save the ORIGINAL full response (with sources) to the DB
                             # so that sources can be re-rendered on page load
-                            db_response = original_api_response if fn_name == "search_web" else api_response
+                            db_response = original_api_response if fn_name in ["search_web", "crawl_website"] else api_response
                             fr_json = json.dumps({
                                 "function_response": {
                                     "name": fn_name,
@@ -1980,7 +2040,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                         # save_message(session_id, "user", continue_msg)
                         
                         # Notify UI
-                        yield format_sse(f'<div class="text-xs text-gray-400 mb-2 italic">⏳ Auto fixing encountered issues ({auto_continue_count}/{max_auto_continues})...</div>')
+                        yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Bear with me, I am fixing encountered issues ({auto_continue_count}/{max_auto_continues})...</div>')
                     break  # Only trigger once per response
             
             # If not auto-continuing, finalize

@@ -158,15 +158,16 @@ uvicorn main:app --reload
 The chatbot has access to the following tools:
 
 1.  **`search_web(query)`**: Searches the internet using Tavily API.
-2.  **`execute_calculation(code)`**: Executes Python code (numpy/pandas) for math/logic.
-3.  **`generate_chart(code)`**: Creates visualizations using matplotlib.
-4.  **`generate_image(description)`**: Generates artistic images via Pollinations.ai.
-5.  **`get_current_datetime(timezone)`**: Returns current date/time (timezone-aware).
-6.  **`get_user_timezone()`**: Returns the user's detected timezone.
-7.  **`get_coordinates(location)`**: Returns latitude/longitude for a location.
-8.  **`get_weather(location)`**: Returns current weather for a location via XWeather MCP.
-9.  **`get_forecast_weather(location)`**: Returns multi-day weather forecast via XWeather MCP.
-10. **`get_precipitation_timing(location)`**: Returns rain/snow start/stop timing via XWeather MCP.
+2.  **`crawl_website(url, max_depth, limit, instructions)`**: Crawls a website starting from a URL to extract content from multiple pages. Useful for exploring site structure or gathering information from multiple pages.
+3.  **`execute_calculation(code)`**: Executes Python code (numpy/pandas) for math/logic.
+4.  **`generate_chart(code)`**: Creates visualizations using matplotlib.
+5.  **`generate_image(description)`**: Generates artistic images via Pollinations.ai.
+6.  **`get_current_datetime(timezone)`**: Returns current date/time (timezone-aware).
+7.  **`get_user_timezone()`**: Returns the user's detected timezone.
+8.  **`get_coordinates(location)`**: Returns latitude/longitude for a location.
+9.  **`get_weather(location)`**: Returns current weather for a location via XWeather MCP.
+10. **`get_forecast_weather(location)`**: Returns multi-day weather forecast via XWeather MCP.
+11. **`get_precipitation_timing(location)`**: Returns rain/snow start/stop timing via XWeather MCP.
 
 ## Troubleshooting
 
