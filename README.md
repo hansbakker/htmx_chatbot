@@ -43,6 +43,7 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
     *   The AI automatically provides relevant follow-up questions or actions as clickable chips.
     *   Clicking a suggestion automatically submits it to the chat.
 *   **Robust Error Handling:** Gracefully handles API quota limits, token limits, and empty responses with automatic retries and user notifications.
+*   **Auto-Fix / Auto-Continue:** When the AI indicates it will retry or needs to continue (e.g., "let me try again", "please wait"), the system automatically triggers a follow-up request without requiring user input. Configurable retry phrases in `RETRY_PHRASES` constant.
 
 ## Prerequisites
 

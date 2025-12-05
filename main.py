@@ -49,6 +49,39 @@ import numpy as np
 client_ip_ctx = contextvars.ContextVar("client_ip", default=None)
 session_id_ctx = contextvars.ContextVar("session_id", default=None)
 
+# Retry phrases that trigger auto-continue (case-insensitive check)
+RETRY_PHRASES = [
+    "please wait",
+    "please give me a moment",
+    "let me try",
+    "i'll try",
+    "i will try",
+    "bear with me",
+    "i'll proceed",
+    "i will proceed",
+    "i'll get that",
+    "i'll get",
+    "i will get that",
+    "i'll wait",
+    "i will wait",
+    "i'll stop",
+    "i will stop",
+    "working on it",
+    "one moment",
+    "give me a moment",
+    "let me fix",
+    "i'll fix",
+    "i will fix",
+    "i'll adjust",
+    "i will adjust",
+    "i'll retry",
+    "i will retry",
+    "i will",
+    "stand by",
+    "might take a few moments",
+    "here we go"
+]
+
 # --- 1. CONFIGURATION ---
 load_dotenv()
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
@@ -89,10 +122,6 @@ def get_system_instruction() -> str:
 - use metric system for measurements,
 - use Centigrade for temperature,   
 - my location is : "Utrecht, The Netherlands".  use that location for any queries that relate to the 'implied' current location of the user (i.e. 'here') when approximate or precise location is needed to answer the question,
-- when using the search_web tool remember the urls of the sources that were found, and offer to provide them,
-- when providing a URL make sure it's clickable, with target being a new tab
-- do not offer to show the code used by either execute_calculation or generate_chart tools
-- if you have actionable follow-up suggestions, append them to the very end of your response as a JSON object with the key 'suggestions', like this: {"suggestions": ["Action 1", "Action 2"]}. Do not wrap this in markdown code blocks. Make sure it is the last thing in your response.
 """
     save_system_instruction(instruction)
     return instruction
@@ -776,7 +805,7 @@ def import_package(package_name,install=True):
                 subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])            
                 res = importlib.import_module(package_name)
                 importlib.invalidate_caches()
-                return {"response": "Failed to import {package_name}: {e}"}
+                return {"response": "Succesfully installed & imported {package_name}: {e}"}
             else:
                 print(f"Failed to import {package_name}, NOT installing...")
                 return {"response": "Failed to import {package_name}: {e}"}
@@ -797,7 +826,7 @@ def write_source_code(file_path: str, code: str):
     """
     try:
         if file_path!="main.py":
-            with open("./static/generated_code"+file_path, 'w') as f:
+            with open(file_path, 'w') as f:
                 print(f"Writing file {file_path}")
                 f.write(code)
                 return f"Successfully wrote file {file_path}"
@@ -818,7 +847,7 @@ def read_source_code(file_path: str):
     """
     try:
         if file_path!="main.py":
-            with open("./static/generated_code"+file_path, 'r') as f:
+            with open(file_path, 'r') as f:
                 print(f"Reading file {file_path}")
                 code = f.read()
                 return code
@@ -1501,43 +1530,43 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             if not has_file_in_context:
                 if tavily_client:
                     tools.append(search_web)
-                    current_instruction += "\n\nYou have access to a 'search_web' tool. You must use it whenever the user asks for current information, news, or facts you don't know. Do NOT invent new tools. Only use 'search_web' for searching."
+                    current_instruction += "\n\n- You have access to a 'search_web' tool. You must use it whenever the user asks for current information, news, or facts you don't know. Do NOT invent new tools. Only use 'search_web' for searching."
                 
                 tools.append(read_source_code)
-                current_instruction += "\n\nYou have access to a 'read_source_code' tool. Use it for reading your own source code files. It returns TEXT output. It CANNOT generate images."
+                current_instruction += "\n\n- You have access to a 'read_source_code' tool. Use it for reading your own source code files. It returns TEXT output. It CANNOT generate images."
                 
                 tools.append(write_source_code)
-                current_instruction += "\n\nYou have access to a 'write_source_code' tool. Use it for writing (modified) source code to file. It returns TEXT output. It CANNOT generate images."
+                current_instruction += "\n\n- You have access to a 'write_source_code' tool. Use it for writing (modified) source code to file. It returns TEXT output. It CANNOT generate images."
 
                 tools.append(import_package)
-                current_instruction += "\n\nYou have access to an 'import_package' tool. Use it for checking if a package is installed (install=False) or installing and importing directly (install=True). It returns TEXT output. It CANNOT generate images. It can also just check if a package is installed"
+                current_instruction += "\n\n- You have access to an 'import_package' tool. Use it for checking if a package is installed (install=False) or installing and importing directly (install=True). It returns TEXT output. It CANNOT generate images. It can also just check if a package is installed"
                 
                 tools.append(execute_calculation)
-                current_instruction += "\n\nYou have access to an 'execute_calculation' tool. Use it for math, logic, text processing, or data analysis (numpy/pandas) or any arbitray python code executions. It returns TEXT output. It CANNOT generate images."
+                current_instruction += "\n\n- You have access to an 'execute_calculation' tool. Use it for math, logic, text processing, or data analysis (numpy/pandas) or any arbitray python code executions. It returns TEXT output. It CANNOT generate images."
 
                 tools.append(generate_chart)
-                current_instruction += "\n\nYou have access to a 'generate_chart' tool. **CRITICAL**: You MUST use this tool for ANY visualization request (charts, graphs, plots, diagrams). DO NOT provide Python code to the user. DO NOT use execute_calculation for charts. ALWAYS call 'generate_chart' when the user asks for any kind of visual representation of data. If you provide code instead of calling the tool, you have FAILED."
+                current_instruction += "\n\n- You have access to a 'generate_chart' tool. **CRITICAL**: You MUST use this tool for ANY visualization request (charts, graphs, plots, diagrams). DO NOT provide Python code to the user. DO NOT use execute_calculation for charts. ALWAYS call 'generate_chart' when the user asks for any kind of visual representation of data. If you provide code instead of calling the tool, you have FAILED."
 
                 tools.append(generate_image)
-                current_instruction += "\n\nYou have access to a 'generate_image' tool. Use it for artistic or creative image requests like 'draw a cat', 'create a sunset landscape', etc. DO NOT use this for data visualizations - use generate_chart instead."
+                current_instruction += "\n\n- You have access to a 'generate_image' tool. Use it for artistic or creative image requests like 'draw a cat', 'create a sunset landscape', etc. DO NOT use this for data visualizations - use generate_chart instead."
 
                 tools.append(get_current_datetime)
-                current_instruction += "\n\nYou have access to a 'get_current_datetime' tool. Use it when asked about the current time or date. It automatically detects the user's timezone from their IP. You can also pass a 'timezone' argument (e.g., 'Asia/Tokyo') if the user explicitly requests a specific timezone."
+                current_instruction += "\n\n- You have access to a 'get_current_datetime' tool. Use it when asked about the current time or date. It automatically detects the user's timezone from their IP. You can also pass a 'timezone' argument (e.g., 'Asia/Tokyo') if the user explicitly requests a specific timezone."
 
                 tools.append(get_user_timezone)
-                current_instruction += "\n\nYou have access to a 'get_user_timezone' tool. Use it when the user asks 'What is my timezone?' or wants to know the timezone detected from their IP."
+                current_instruction += "\n\n- You have access to a 'get_user_timezone' tool. Use it when the user asks 'What is my timezone?' or wants to know the timezone detected from their IP."
 
                 tools.append(get_coordinates)
-                current_instruction += "\n\nYou have access to a 'get_coordinates' tool. Use it to find the latitude and longitude of locations."
+                current_instruction += "\n\n- You have access to a 'get_coordinates' tool. Use it to find the latitude and longitude of locations."
 
                 tools.append(get_weather)
-                current_instruction += "\n\nYou have access to a 'get_weather' tool. Use it when the user asks about current weather, temperature, or conditions for any location."
+                current_instruction += "\n\n- You have access to a 'get_weather' tool. Use it when the user asks about current weather, temperature, or conditions for any location."
 
                 tools.append(get_forecast_weather)
-                current_instruction += "\n\nYou have access to a 'get_forecast_weather' tool. Use it for multi-day weather forecasts, planning, event scheduling, or when the user asks about future weather."
+                current_instruction += "\n\n- You have access to a 'get_forecast_weather' tool. Use it for multi-day weather forecasts, planning, event scheduling, or when the user asks about future weather."
 
                 tools.append(get_precipitation_timing)
-                current_instruction += "\n\nYou have access to a 'get_precipitation_timing' tool. Use it when the user asks 'when will it rain?', 'when will it stop raining?', or needs precipitation timing information."
+                current_instruction += "\n\n- You have access to a 'get_precipitation_timing' tool. Use it when the user asks 'when will it rain?', 'when will it stop raining?', or needs precipitation timing information."
             else:
                 # When files are present, clear history to avoid API compatibility issues
                 # Keep only the current message (last one in payload)
@@ -1547,7 +1576,13 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                     messages_payload = [current_msg]
                 
                 current_instruction += "\n\nNote: Tool calling is disabled because you are analyzing an uploaded file. Focus on the file content."
-
+            
+            current_instruction += """\n\n- if you have actionable follow-up suggestions, append them to the very end of your response as a JSON object with the key 'suggestions', like this: {"suggestions": ["Action 1", "Action 2"]}. Do not wrap this in markdown code blocks. Make sure it is the last thing in your response."""
+            current_instruction += """\n\n- when providing a URL make sure it's clickable, with target being a new tab"""
+            current_instruction += """\n\n- when using search_web tool, remember the urls that were used"""
+            current_instruction += """\n\n- when a tool call fails or produces an error, do NOT say "let me try again" or "please wait" - instead, immediately call the tool again with corrected parameters in the SAME response. Do not wait for user confirmation."""
+            current_instruction += """\n\n- if you end your response with something you are going to do, like: "I'll get that chart ready for you now" or "I'll get that image ready for you now", do not wait for user confirmation but proceed as if the user replied with "OK". """
+            
             # Debug: Print registered tools
             tool_names = [t.__name__ if hasattr(t, '__name__') else str(t) for t in tools]
             print(f"Registered tools: {tool_names}")
@@ -1563,307 +1598,352 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             # automatic function calling isn't fully supported in stream mode for single-turn logic easily without chat session.
             # But we can do it manually.
             
-            # Main loop for handling function calls
-            turn = 0
-            max_turns = 10
-            full_response_text = ""  # Initialize to prevent UnboundLocalError
+            # Auto-continue loop - will retry if model says "please wait" etc.
+            auto_continue_count = 0
+            max_auto_continues = 3
+            should_auto_continue = True
             
-            while turn < max_turns:
-                turn += 1
-                # First attempt - Use stream=False to safely check for function calls
-                # This avoids complexity with iterating streams for tool use
-                print("Sending request to model (stream=False)...")
-                if turn > 1:
-                     yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking (Step {turn})...</div>')
-                else:
-                     yield format_sse('<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking...</div>')
+            while should_auto_continue and auto_continue_count <= max_auto_continues:
+                should_auto_continue = False  # Reset flag, will be set if retry phrase detected
                 
-                response = None
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        response = model.generate_content(messages_payload, stream=False)
-                        # Check if valid
-                        if response.candidates and response.candidates[0].content.parts:
-                            break # Success
-                        else:
-                            print(f"Attempt {attempt+1}/{max_retries}: Empty response. Retrying...")
-                            yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking (Attempt {attempt+1})...</div>')
-                            if attempt < max_retries - 1:
-                                await asyncio.sleep(0.5)
-                    except ResourceExhausted as e:
-                        print(f"Quota exceeded: {e}")
-                        yield format_sse(f'<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Quota Exceeded:</strong> You have hit the API rate limit. Please wait a moment and try again.</div>')
-                        return # Stop processing immediately
-                    except Exception as e:
-                        error_str = str(e)
-                        
-                        # Check for token limit errors (don't retry)
-                        if "token count exceeds" in error_str.lower() or "maximum number of tokens" in error_str.lower():
-                            print(f"Token limit exceeded: {e}")
-                            yield format_sse(f'<div class="bg-orange-50 border border-orange-200 text-orange-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Token Limit Exceeded:</strong> The input (including file content and chat history) is too large. The maximum allowed is 1,048,576 tokens. Please try with a smaller file or clear your chat history.</div>')
-                            return # Stop processing immediately
-                        
-                        # Check for invalid argument errors (don't retry)
-                        if "400" in error_str and "invalid argument" in error_str.lower():
-                            print(f"Invalid argument error: {e}")
-                            yield format_sse(f'<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Invalid Request:</strong> The file or request format is not supported. Please try a different file or check that the file is not corrupted.</div>')
-                            return # Stop processing immediately
-                        
-                        # Check for 403 Forbidden (File permission/expiration)
-                        if "403" in error_str or "permission to access" in error_str.lower():
-                            print(f"Permission denied (expired file?): {e}")
-                            yield format_sse(f'<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Access Denied:</strong> A file in your conversation history is no longer accessible (it may have expired). Please <button hx-post="/reset" hx-target="#chat-messages" hx-swap="innerHTML" class="underline font-bold hover:text-red-800">Reset Chat</button> to continue.</div>')
-                            return # Stop processing immediately
-
-                        # Check for 429 in string representation just in case
-                        if "429" in error_str or "quota" in error_str.lower():
-                            print(f"Quota exceeded (detected via string): {e}")
+                # Main loop for handling function calls
+                turn = 0
+                max_turns = 10
+                full_response_text = ""  # Initialize to prevent UnboundLocalError
+            
+                while turn < max_turns:
+                    turn += 1
+                    # First attempt - Use stream=False to safely check for function calls
+                    # This avoids complexity with iterating streams for tool use
+                    print("Sending request to model (stream=False)...")
+                    if turn > 1:
+                         yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking (Step {turn})...</div>')
+                    else:
+                         yield format_sse('<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking...</div>')
+                    
+                    response = None
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            response = model.generate_content(messages_payload, stream=False)
+                            # Check if valid
+                            if response.candidates and response.candidates[0].content.parts:
+                                break # Success
+                            else:
+                                print(f"Attempt {attempt+1}/{max_retries}: Empty response. Retrying...")
+                                yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking (Attempt {attempt+1})...</div>')
+                                if attempt < max_retries - 1:
+                                    await asyncio.sleep(0.5)
+                        except ResourceExhausted as e:
+                            print(f"Quota exceeded: {e}")
                             yield format_sse(f'<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Quota Exceeded:</strong> You have hit the API rate limit. Please wait a moment and try again.</div>')
                             return # Stop processing immediately
-
-                        print(f"Attempt {attempt+1}/{max_retries}: Error {e}. Retrying...")
-                        yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking (Retrying)...</div>')
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(0.5)
-                
-                
-                try:
-                    # Check if we have candidates after retries
-                    if not response or not response.candidates:
-                        feedback = response.prompt_feedback if response else "No response"
-                        print(f"No candidates returned after retries. Feedback: {feedback}")
-                        yield format_sse("<div><strong>Error:</strong> No response from AI (Safety Block or API Error).</div>")
-                        return
-
-                    # Check for function call in the full response
-                    if not response.candidates[0].content.parts:
-                         print("Candidate returned but no parts after retries.")
-                         yield format_sse("<div><strong>Error:</strong> Empty response content.</div>")
-                         return
-
-                    part = response.candidates[0].content.parts[0]
-                    
-                    if part.function_call:
-                        print(f"Function call detected: {part.function_call.name}")
-                        fn_name = part.function_call.name
-                        fn_args = dict(part.function_call.args)
-                        
-                        # Notify user we are searching
-                        yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Executing: {fn_name}...</div>')
-                        
-                        # Execute tool
-                        if fn_name == "search_web":
-                            api_response = search_web(fn_args.get("query"))
-                        elif fn_name == "read_source_code":
-                            api_response = read_source_code(fn_args.get("file_path"))
-                        elif fn_name == "write_source_code":
-                            api_response = write_source_code(fn_args.get("file_path"), fn_args.get("code"))
-                        elif fn_name == "import_package":
-                            api_response = import_package(fn_args.get("package_name"))
-                        elif fn_name == "execute_calculation":
-                            api_response = execute_calculation(fn_args.get("code"))
-                        elif fn_name == "generate_chart":
-                            api_response = generate_chart(fn_args.get("code"))
-                        elif fn_name == "generate_image":
-                            api_response = generate_image(fn_args.get("description"))
-                        elif fn_name == "get_current_datetime":
-                            timezone_arg = fn_args.get("timezone")
-                            api_response = get_current_datetime(timezone_arg) if timezone_arg else get_current_datetime()
-                        elif fn_name == "get_user_timezone":
-                            api_response = get_user_timezone()
-                        elif fn_name == "get_coordinates":
-                            api_response = get_coordinates(fn_args.get("location"))
-                        elif fn_name == "get_weather":
-                            api_response = get_weather(fn_args.get("location"))
-                        elif fn_name == "get_forecast_weather":
-                            api_response = get_forecast_weather(fn_args.get("location"))
-                        elif fn_name == "get_precipitation_timing":
-                            api_response = get_precipitation_timing(fn_args.get("location"))
-                        else:
-                            api_response = f"Error: Unknown tool '{fn_name}'"
+                        except Exception as e:
+                            error_str = str(e)
                             
-                        # Update history with function call and response
+                            # Check for token limit errors (don't retry)
+                            if "token count exceeds" in error_str.lower() or "maximum number of tokens" in error_str.lower():
+                                print(f"Token limit exceeded: {e}")
+                                yield format_sse(f'<div class="bg-orange-50 border border-orange-200 text-orange-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Token Limit Exceeded:</strong> The input (including file content and chat history) is too large. The maximum allowed is 1,048,576 tokens. Please try with a smaller file or clear your chat history.</div>')
+                                return # Stop processing immediately
+                            
+                            # Check for invalid argument errors (don't retry)
+                            if "400" in error_str and "invalid argument" in error_str.lower():
+                                print(f"Invalid argument error: {e}")
+                                yield format_sse(f'<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Invalid Request:</strong> The file or request format is not supported. Please try a different file or check that the file is not corrupted.</div>')
+                                return # Stop processing immediately
+                            
+                            # Check for 403 Forbidden (File permission/expiration)
+                            if "403" in error_str or "permission to access" in error_str.lower():
+                                print(f"Permission denied (expired file?): {e}")
+                                yield format_sse(f'<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Access Denied:</strong> A file in your conversation history is no longer accessible (it may have expired). Please <button hx-post="/reset" hx-target="#chat-messages" hx-swap="innerHTML" class="underline font-bold hover:text-red-800">Reset Chat</button> to continue.</div>')
+                                return # Stop processing immediately
+
+                            # Check for 429 in string representation just in case
+                            if "429" in error_str or "quota" in error_str.lower():
+                                print(f"Quota exceeded (detected via string): {e}")
+                                yield format_sse(f'<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm"><strong class="font-semibold">Quota Exceeded:</strong> You have hit the API rate limit. Please wait a moment and try again.</div>')
+                                return # Stop processing immediately
+
+                            print(f"Attempt {attempt+1}/{max_retries}: Error {e}. Retrying...")
+                            yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking (Retrying)...</div>')
+                            if attempt < max_retries - 1:
+                                await asyncio.sleep(0.5)
+                    
+                    try:
+                        # Check if we have candidates after retries
+                        if not response or not response.candidates:
+                            feedback = response.prompt_feedback if response else "No response"
+                            print(f"No candidates returned after retries. Feedback: {feedback}")
+                            yield format_sse("<div><strong>Error:</strong> No response from AI (Safety Block or API Error).</div>")
+                            return
+
+                        # Check for function call in the full response
+                        if not response.candidates[0].content.parts:
+                             print("Candidate returned but no parts after retries.")
+                             yield format_sse("<div><strong>Error:</strong> Empty response content.</div>")
+                             return
+
+                        part = response.candidates[0].content.parts[0]
+                    
+                        if part.function_call:
+                            print(f"Function call detected: {part.function_call.name}")
+                            fn_name = part.function_call.name
+                            fn_args = dict(part.function_call.args)
+                            
+                            # Notify user we are searching
+                            yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Executing: {fn_name}...</div>')
+                            
+                            # Execute tool
+                            if fn_name == "search_web":
+                                api_response = search_web(fn_args.get("query"))
+                            elif fn_name == "read_source_code":
+                                api_response = read_source_code(fn_args.get("file_path"))
+                            elif fn_name == "write_source_code":
+                                api_response = write_source_code(fn_args.get("file_path"), fn_args.get("code"))
+                            elif fn_name == "import_package":
+                                api_response = import_package(fn_args.get("package_name"))
+                            elif fn_name == "execute_calculation":
+                                api_response = execute_calculation(fn_args.get("code"))
+                            elif fn_name == "generate_chart":
+                                api_response = generate_chart(fn_args.get("code"))
+                            elif fn_name == "generate_image":
+                                api_response = generate_image(fn_args.get("description"))
+                            elif fn_name == "get_current_datetime":
+                                timezone_arg = fn_args.get("timezone")
+                                api_response = get_current_datetime(timezone_arg) if timezone_arg else get_current_datetime()
+                            elif fn_name == "get_user_timezone":
+                                api_response = get_user_timezone()
+                            elif fn_name == "get_coordinates":
+                                api_response = get_coordinates(fn_args.get("location"))
+                            elif fn_name == "get_weather":
+                                api_response = get_weather(fn_args.get("location"))
+                            elif fn_name == "get_forecast_weather":
+                                api_response = get_forecast_weather(fn_args.get("location"))
+                            elif fn_name == "get_precipitation_timing":
+                                api_response = get_precipitation_timing(fn_args.get("location"))
+                            else:
+                                api_response = f"Error: Unknown tool '{fn_name}'"
+                                
+                            # Update history with function call and response
+                            
+                            # 1. Add the assistant's function call
+                            messages_payload.append({
+                                "role": "model",
+                                "parts": [part]
+                            })
+                            
+                            # SAVE FUNCTION CALL TO DB
+                            fc_json = json.dumps({
+                                "function_call": {
+                                    "name": fn_name,
+                                    "args": fn_args
+                                }
+                            })
+                            save_message(session_id, "model", fc_json)
                         
-                        # 1. Add the assistant's function call
-                        messages_payload.append({
-                            "role": "model",
-                            "parts": [part]
-                        })
-                        
-                        # SAVE FUNCTION CALL TO DB
-                        fc_json = json.dumps({
-                            "function_call": {
-                                "name": fn_name,
-                                "args": fn_args
-                            }
-                        })
-                        save_message(session_id, "model", fc_json)
-                        
-                        # Display code block for code execution tools
-                        if fn_name in ["execute_calculation", "generate_chart"]:
-                            code = fn_args.get("code", "")
-                            if code:
-                                # Use OOB swap to insert the code block before the streaming response
-                                code_html = f"""
-                                <div id="code-block-{stream_id}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
-                                    <details class="group">
-                                        <summary class="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
-                                            <span class="transition group-open:rotate-90">▶</span>
-                                            <span>🔧 Code executed via <code class="text-xs bg-gray-200 dark:bg-gray-700 px-2 py-1 rounded">{fn_name}</code></span>
-                                        </summary>
-                                        <div class="mt-3">
-                                            <pre class="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm"><code class="language-python">{code}</code></pre>
-                                        </div>
-                                    </details>
-                                </div>
-                                """
-                                yield format_sse(code_html)
-                        
-                        # Display sources block for search_web tool
-                        if fn_name == "search_web":
-                            try:
-                                # Parse the JSON response to extract sources
-                                search_data = json.loads(api_response)
-                                sources = search_data.get("sources", [])
-                                if sources:
-                                    sources_html = """
-                                    <div id="sources-block-{stream_id}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                            # Display code block for code execution tools
+                            if fn_name in ["execute_calculation", "generate_chart"]:
+                                code = fn_args.get("code", "")
+                                if code:
+                                    # Use OOB swap to insert the code block before the streaming response
+                                    code_html = f"""
+                                    <div id="code-block-{stream_id}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
                                         <details class="group">
                                             <summary class="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
                                                 <span class="transition group-open:rotate-90">▶</span>
-                                                <span>🔍 Sources used for web search</span>
+                                                <span>🔧 Code executed via <code class="text-xs bg-gray-200 dark:bg-gray-700 px-2 py-1 rounded">{fn_name}</code></span>
                                             </summary>
-                                            <div class="mt-3 space-y-2">
-                                    """.format(stream_id=stream_id)
-                                    
-                                    for idx, source in enumerate(sources, 1):
-                                        url = source.get('url', '')
-                                        title = source.get('title', url)
-                                        sources_html += f"""
-                                        <div class="flex items-start gap-2 text-sm">
-                                            <span class="text-gray-500 dark:text-gray-400 font-mono">{idx}.</span>
-                                            <a href="{url}" target="_blank" rel="noopener noreferrer" 
-                                               class="text-blue-600 dark:text-blue-400 hover:underline flex-1 break-all">
-                                                {title}
-                                            </a>
-                                        </div>
-                                        """
-                                    
-                                    sources_html += """
+                                            <div class="mt-3">
+                                                <pre class="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm"><code class="language-python">{code}</code></pre>
                                             </div>
                                         </details>
                                     </div>
                                     """
-                                    yield format_sse(sources_html)
+                                    yield format_sse(code_html)
+                            
+                            # Display file content for read_source_code and write_source_code tools
+                            if fn_name in ["read_source_code", "write_source_code"]:
+                                file_path = fn_args.get("file_path", "unknown_file")
                                 
-                                # Extract just the context for the model
-                                api_response = search_data.get("context", api_response)
-                            except json.JSONDecodeError:
-                                # If not JSON, use as-is (error message)
-                                pass
-                        
-                        # 2. Add the function response
-                        messages_payload.append({
-                            "role": "function",
-                            "parts": [{
+                                # Determine content to show
+                                content_to_show = ""
+                                action_label = ""
+                                
+                                if fn_name == "read_source_code":
+                                    content_to_show = api_response
+                                    action_label = "Content of"
+                                else: # write_source_code
+                                    content_to_show = fn_args.get("code", "")
+                                    action_label = "Wrote to"
+                                
+                                # Only show if we have content and no error (for read)
+                                if content_to_show and not (fn_name == "read_source_code" and content_to_show.startswith("Error")):
+                                    # Use OOB swap to insert the code block before the streaming response
+                                    code_html = f"""
+                                    <div id="file-content-{stream_id}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                                        <details class="group" open>
+                                            <summary class="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                                                <span class="transition group-open:rotate-90">▶</span>
+                                                <span>📄 {action_label} <code class="text-xs bg-gray-200 dark:bg-gray-700 px-2 py-1 rounded">{os.path.basename(file_path)}</code></span>
+                                            </summary>
+                                            <div class="mt-3">
+                                                <pre class="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-sm"><code class="language-python">{content_to_show}</code></pre>
+                                            </div>
+                                        </details>
+                                    </div>
+                                    """
+                                    yield format_sse(code_html)
+                            
+                            # Display sources block for search_web tool
+                            if fn_name == "search_web":
+                                # Store original response BEFORE we modify api_response
+                                original_api_response = api_response
+                                try:
+                                    # Parse the JSON response to extract sources
+                                    search_data = json.loads(api_response)
+                                    sources = search_data.get("sources", [])
+                                    if sources:
+                                        sources_html = """
+                                        <div id="sources-block-{stream_id}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                                            <details class="group">
+                                                <summary class="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                                                    <span class="transition group-open:rotate-90">▶</span>
+                                                    <span>🔍 Sources used for web search</span>
+                                                </summary>
+                                                <div class="mt-3 space-y-2">
+                                        """.format(stream_id=stream_id)
+                                        
+                                        for idx, source in enumerate(sources, 1):
+                                            url = source.get('url', '')
+                                            title = source.get('title', url)
+                                            sources_html += f"""
+                                            <div class="flex items-start gap-2 text-sm">
+                                                <span class="text-gray-500 dark:text-gray-400 font-mono">{idx}.</span>
+                                                <a href="{url}" target="_blank" rel="noopener noreferrer" 
+                                                   class="text-blue-600 dark:text-blue-400 hover:underline flex-1 break-all">
+                                                    {title}
+                                                </a>
+                                            </div>
+                                            """
+                                        
+                                        sources_html += """
+                                                </div>
+                                            </details>
+                                        </div>
+                                        """
+                                        yield format_sse(sources_html)
+                                    
+                                    # Extract just the context for the model
+                                    api_response = search_data.get("context", api_response)
+                                except json.JSONDecodeError:
+                                    # If not JSON, use as-is (error message)
+                                    pass
+                            
+                            # 2. Add the function response (send context-only to model for search_web)
+                            messages_payload.append({
+                                "role": "function",
+                                "parts": [{
+                                    "function_response": {
+                                        "name": fn_name,
+                                        "response": {"result": api_response}
+                                    }
+                                }]
+                            })
+                            
+                            # SAVE FUNCTION RESPONSE TO DB
+                            # For search_web, save the ORIGINAL full response (with sources) to the DB
+                            # so that sources can be re-rendered on page load
+                            db_response = original_api_response if fn_name == "search_web" else api_response
+                            fr_json = json.dumps({
                                 "function_response": {
                                     "name": fn_name,
-                                    "response": {"result": api_response}
+                                    "response": {"result": db_response}
                                 }
-                            }]
-                        })
+                            })
+                            save_message(session_id, "function", fr_json)
                         
-                        # SAVE FUNCTION RESPONSE TO DB
-                        fr_json = json.dumps({
-                            "function_response": {
-                                "name": fn_name,
-                                "response": {"result": api_response}
-                            }
-                        })
-                        save_message(session_id, "function", fr_json)
-                        
-                        # CHART DISPLAY: If a chart was generated, display it directly
-                        if fn_name == "generate_chart":
-                            try:
-                                # Check if response is valid JSON
+                            # CHART DISPLAY: If a chart was generated, display it directly
+                            if fn_name == "generate_chart":
                                 try:
-                                    resp_data = json.loads(api_response)
-                                except json.JSONDecodeError:
-                                    print(f"Warning: generate_chart returned non-JSON response: {api_response}")
-                                    resp_data = None
+                                    # Check if response is valid JSON
+                                    try:
+                                        resp_data = json.loads(api_response)
+                                    except json.JSONDecodeError:
+                                        print(f"Warning: generate_chart returned non-JSON response: {api_response}")
+                                        resp_data = None
+                                        
+                                    if isinstance(resp_data, dict) and "image_path" in resp_data:
+                                        chart_path = resp_data["image_path"]
+                                        print(f"Chart generated at {chart_path}.")
+                                        
+                                        # Display chart to user immediately
+                                        yield format_sse(f'<div class="mb-2"><img src="{chart_path}" alt="Generated Chart" class="max-w-full h-auto rounded-lg shadow-md"/></div>')
+                                        
+                                        # Set response text for history
+                                        full_response_text = f"![Generated Chart]({chart_path})\n\n*Chart generated successfully.*"
+                                        
+                                        # Notify UI
+                                        yield format_sse(f'<div class="text-xs text-gray-500 mb-2 italic">Chart generated successfully.</div>')
+                                        
+                                        # Break - chart is displayed
+                                        break
+                                        
+                                except Exception as e:
+                                    print(f"Error displaying chart: {e}")
+                                    traceback.print_exc()
+                            
+                            # IMAGE DISPLAY: If an image was generated, display it directly
+                            if fn_name == "generate_image":
+                                try:
+                                    print(f"Image generation response: {api_response}")
+                                    # The api_response contains markdown: ![description](url)
+                                    # Extract the URL and display as an img tag
+                                    import re
+                                    match = re.search(r'!\[([^\]]*)\]\(([^\)]+)\)', api_response)
+                                    if match:
+                                        description = match.group(1)
+                                        image_url = match.group(2)
+                                        print(f"Extracted image URL: {image_url}")
+                                        
+                                        # Display image directly
+                                        yield format_sse(f'<div class="mb-2"><img src="{image_url}" alt="{description}" class="max-w-full h-auto rounded-lg shadow-md"/></div>')
+                                        
+                                        # Set response text for history (keep as markdown so it persists)
+                                        full_response_text = api_response
+                                        
+                                        # Break out of loop
+                                        print("Breaking out of loop after image display")
+                                        break
+                                    else:
+                                        print("Failed to parse markdown image")
+                                        # Fallback if markdown parsing fails
+                                        yield format_sse(f'<div class="mb-2">{api_response}</div>')
+                                        full_response_text = api_response
+                                        break
                                     
-                                if isinstance(resp_data, dict) and "image_path" in resp_data:
-                                    chart_path = resp_data["image_path"]
-                                    print(f"Chart generated at {chart_path}.")
-                                    
-                                    # Display chart to user immediately
-                                    yield format_sse(f'<div class="mb-2"><img src="{chart_path}" alt="Generated Chart" class="max-w-full h-auto rounded-lg shadow-md"/></div>')
-                                    
-                                    # Set response text for history
-                                    full_response_text = f"![Generated Chart]({chart_path})\n\n*Chart generated successfully.*"
-                                    
-                                    # Notify UI
-                                    yield format_sse(f'<div class="text-xs text-gray-500 mb-2 italic">Chart generated successfully.</div>')
-                                    
-                                    # Break - chart is displayed
-                                    break
-                                    
-                            except Exception as e:
-                                print(f"Error displaying chart: {e}")
-                                traceback.print_exc()
+                                except Exception as e:
+                                    print(f"Error displaying image: {e}")
+                                    traceback.print_exc()
+                            
+                            # CONTINUE LOOP to let model use the result
+                            continue
                         
-                        # IMAGE DISPLAY: If an image was generated, display it directly
-                        if fn_name == "generate_image":
-                            try:
-                                print(f"Image generation response: {api_response}")
-                                # The api_response contains markdown: ![description](url)
-                                # Extract the URL and display as an img tag
-                                import re
-                                match = re.search(r'!\[([^\]]*)\]\(([^\)]+)\)', api_response)
-                                if match:
-                                    description = match.group(1)
-                                    image_url = match.group(2)
-                                    print(f"Extracted image URL: {image_url}")
-                                    
-                                    # Display image directly
-                                    yield format_sse(f'<div class="mb-2"><img src="{image_url}" alt="{description}" class="max-w-full h-auto rounded-lg shadow-md"/></div>')
-                                    
-                                    # Set response text for history (keep as markdown so it persists)
-                                    full_response_text = api_response
-                                    
-                                    # Break out of loop
-                                    print("Breaking out of loop after image display")
-                                    break
-                                else:
-                                    print("Failed to parse markdown image")
-                                    # Fallback if markdown parsing fails
-                                    yield format_sse(f'<div class="mb-2">{api_response}</div>')
-                                    full_response_text = api_response
-                                    break
-                                
-                            except Exception as e:
-                                print(f"Error displaying image: {e}")
-                                traceback.print_exc()
-                        
-                        # CONTINUE LOOP to let model use the result
-                        continue
+                        else:
+                            # No function call, just text
+                            if part.text:
+                                full_response_text = part.text
+                                yield format_sse(full_response_text)
+                                break # Exit loop, we have the final answer
                     
-                    else:
-                        # No function call, just text
-                        if part.text:
-                            full_response_text = part.text
-                            yield format_sse(full_response_text)
-                            break # Exit loop, we have the final answer
-                
-                except Exception as e:
-                    print(f"Error processing response: {e}")
-                    yield format_sse(f"Error: {str(e)}")
-                    break
-                
-                # If we broke from the parts loop and have a response, exit turn loop
-                if full_response_text:
-                    break
+                    except Exception as e:
+                        print(f"Error processing response: {e}")
+                        yield format_sse(f"Error: {str(e)}")
+                        break
+                    
+                    # If we broke from the parts loop and have a response, exit turn loop
+                    if full_response_text:
+                        break
 
             # 3. Save to Session History
             # Ensure we ALWAYS save a model response to prevent history corruption (dangling user messages)
@@ -1874,12 +1954,42 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 yield format_sse("<div><em>(The AI processed the request but returned no text.)</em></div>")
 
             save_message(session_id, "model", full_response_text)
-
-            # 4. Finalize UI (OOB Swap)
-            final_div = render_bot_message(full_response_text, stream_id=stream_id, final=True)
             
-            yield format_sse(final_div)
-            yield format_sse("", event="close")
+            # 5. Check for auto-continue (retry phrases)
+            # Get last 200 chars and check for retry phrases
+            response_end = full_response_text[-200:].lower() if len(full_response_text) > 200 else full_response_text.lower()
+            
+            for phrase in RETRY_PHRASES:
+                if phrase in response_end:
+                    print(f"Auto-continue triggered: detected '{phrase}' in response")
+                    auto_continue_count += 1
+                    if auto_continue_count <= max_auto_continues:
+                        should_auto_continue = True
+                        # Add model response to payload
+                        messages_payload.append({
+                            "role": "model",
+                            "parts": [{"text": full_response_text}]
+                        })
+                        # Add synthetic "continue" user message
+                        continue_msg = "continue"
+                        messages_payload.append({
+                            "role": "user",
+                            "parts": [{"text": continue_msg}]
+                        })
+                        # For now commented out : Save the continue message to history
+                        # save_message(session_id, "user", continue_msg)
+                        
+                        # Notify UI
+                        yield format_sse(f'<div class="text-xs text-gray-400 mb-2 italic">⏳ Auto fixing encountered issues ({auto_continue_count}/{max_auto_continues})...</div>')
+                    break  # Only trigger once per response
+            
+            # If not auto-continuing, finalize
+            if not should_auto_continue:
+                # 4. Finalize UI (OOB Swap)
+                final_div = render_bot_message(full_response_text, stream_id=stream_id, final=True)
+                
+                yield format_sse(final_div)
+                yield format_sse("", event="close")
 
         except Exception as e:
             print(f"CRITICAL ERROR in stream_response: {e}")
