@@ -71,7 +71,7 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
     Create a `requirements.txt` file (or run directly):
 
     ```bash
-    pip install fastapi uvicorn jinja2 python-dotenv google-generativeai markdown pillow python-multipart tavily-python geopy matplotlib numpy pandas requests
+    pip install fastapi uvicorn jinja2 python-dotenv google-generativeai markdown pillow python-multipart tavily-python geopy matplotlib numpy pandas requests plotly kaleido
     ```
 
 4.  **Configure Environment:**
@@ -160,14 +160,15 @@ The chatbot has access to the following tools:
 1.  **`search_web(query)`**: Searches the internet using Tavily API.
 2.  **`crawl_website(url, max_depth, limit, instructions)`**: Crawls a website starting from a URL to extract content from multiple pages. Useful for exploring site structure or gathering information from multiple pages.
 3.  **`execute_calculation(code)`**: Executes Python code (numpy/pandas) for math/logic.
-4.  **`generate_chart(code)`**: Creates visualizations using matplotlib.
-5.  **`generate_image(description)`**: Generates artistic images via Pollinations.ai.
-6.  **`get_current_datetime(timezone)`**: Returns current date/time (timezone-aware).
-7.  **`get_user_timezone()`**: Returns the user's detected timezone.
-8.  **`get_coordinates(location)`**: Returns latitude/longitude for a location.
-9.  **`get_weather(location)`**: Returns current weather for a location via XWeather MCP.
-10. **`get_forecast_weather(location)`**: Returns multi-day weather forecast via XWeather MCP.
-11. **`get_precipitation_timing(location)`**: Returns rain/snow start/stop timing via XWeather MCP.
+4.  **`generate_chart(code)`**: Creates standard visualizations using matplotlib (bar, line, pie, scatter, histograms).
+5.  **`generate_plotly_chart(code)`**: Creates advanced visualizations using Plotly (3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps).
+6.  **`generate_image(description)`**: Generates artistic images via Pollinations.ai.
+7.  **`get_current_datetime(timezone)`**: Returns current date/time (timezone-aware).
+8.  **`get_user_timezone()`**: Returns the user's detected timezone.
+9.  **`get_coordinates(location)`**: Returns latitude/longitude for a location.
+10. **`get_weather(location)`**: Returns current weather for a location via XWeather MCP.
+11. **`get_forecast_weather(location)`**: Returns multi-day weather forecast via XWeather MCP.
+12. **`get_precipitation_timing(location)`**: Returns rain/snow start/stop timing via XWeather MCP.
 
 ## Troubleshooting
 

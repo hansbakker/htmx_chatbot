@@ -10,3 +10,5 @@ tavily-python
 geopy
 matplotlib
 numpy
+plotly
+kaleido

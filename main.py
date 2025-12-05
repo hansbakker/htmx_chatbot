@@ -45,6 +45,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 # import pandas as pd
 
+# Configure Plotly
+import plotly.express as px
+import plotly.graph_objects as go
+import plotly.io as pio
+
 # Context variable to store client IP
 client_ip_ctx = contextvars.ContextVar("client_ip", default=None)
 session_id_ctx = contextvars.ContextVar("session_id", default=None)
@@ -463,7 +468,7 @@ async def get_home(request: Request, response: Response):
                     fn_args = fc_data.get("function_call", {}).get("args", {})
                     
                     # Only render code execution function calls
-                    if fn_name in ["execute_calculation", "generate_chart"]:
+                    if fn_name in ["execute_calculation", "generate_chart", "generate_plotly_chart"]:
                         code = fn_args.get("code", "")
                         if code:
                             # Render as a collapsible code block
@@ -731,6 +736,14 @@ def render_bot_message(content: str, stream_id: Optional[str] = None, final: boo
         """
     
     # If it's the final content (or historical content)
+    # Preprocess: Convert .html image syntax to links (HTML files can't be embedded as images)
+    import re
+    content = re.sub(
+        r'!\[([^\]]*)\]\(([^)]+\.html)\)',
+        r'<a href="\2" onclick="event.stopPropagation(); event.preventDefault(); window.open(this.href, \'_blank\'); return false;" class="text-blue-500 hover:underline">🔗 Open interactive chart</a>',
+        content
+    )
+    
     # Enable tables extension
     html_content = markdown.markdown(content, extensions=['fenced_code', 'tables'])
     
@@ -1046,6 +1059,102 @@ def generate_chart(code: str):
         print(f"Error in generate_chart: {str(e)}")
         traceback.print_exc()
         return f"Error generating chart: {str(e)}"
+
+
+def generate_plotly_chart(code: str):
+    """
+    Generates an advanced chart using Python and Plotly.
+    Use this tool for complex, interactive, or 3D visualizations that matplotlib cannot handle well.
+    
+    Examples of when to use this over generate_chart:
+    - 3D plots and surfaces
+    - Interactive charts (hover, zoom, pan)
+    - Sunburst/treemap charts
+    - Sankey diagrams
+    - Animated charts
+    - Geographic/map visualizations
+    
+    IMPORTANT:
+    - You MUST save the figure using `fig.write_image('plot.png')` or `fig.write_html('plot.html')`.
+    - For write_image, install kaleido: pip install kaleido
+    - The tool will return the path to the generated image/HTML.
+    - in case of an HTML file, show the location of the file in the response.
+    - Use `import plotly.express as px` or `import plotly.graph_objects as go`.
+    """
+    # Ensure generated directory exists
+    os.makedirs(GENERATED_DIR, exist_ok=True)
+    
+    # Create a captured output stream
+    output_capture = io.StringIO()
+    
+    try:
+        # Redirect stdout
+        with contextlib.redirect_stdout(output_capture):
+            # Execute the code
+            exec(code, {
+                '__builtins__': __builtins__, 
+                'np': np, 
+                'pd': pd, 
+                'px': px, 
+                'go': go,
+                'pio': pio
+            })
+            
+        # Check for generated files (PNG or HTML)
+        generated_file = None
+        
+        # First, check if any PNG or HTML files were created in current directory
+        for file in os.listdir('.'):
+            if file.endswith(('.png', '.html')):
+                # Move to static/generated
+                ext = os.path.splitext(file)[1]
+                new_filename = f"plotly_chart_{uuid.uuid4()}{ext}"
+                dest_path = os.path.join(GENERATED_DIR, new_filename)
+                shutil.move(file, dest_path)
+                generated_file = f"/static/generated/{new_filename}"
+                print(f"Found and moved chart: {file} -> {dest_path}")
+                break
+        
+        output = output_capture.getvalue().strip()
+        
+        if generated_file:
+            # Save to database if session_id is available
+            session_id = session_id_ctx.get()
+            if session_id:
+                try:
+                    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                        conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, dest_path))
+                        print(f"Saved generated file record for session {session_id}: {dest_path}")
+                except Exception as db_e:
+                    print(f"Error saving generated file to DB: {db_e}")
+
+            # Check if HTML or PNG
+            is_html = generated_file.endswith('.html')
+            
+            if is_html:
+                # For HTML files, return a clickable link (can't embed HTML in response)
+                # Note: onclick with window.open forces new window/tab
+                return json.dumps({
+                    "status": "success",
+                    "output": output,
+                    "html_path": generated_file,
+                    "message": f'Interactive Plotly chart generated. <a href="{generated_file}" onclick="event.stopPropagation(); event.preventDefault(); window.open(this.href, \'_blank\'); return false;" class="text-blue-500 hover:underline">🔗 Open chart in new tab</a>'
+                })
+            else:
+                # For PNG files, return image_path for embedding
+                return json.dumps({
+                    "status": "success",
+                    "output": output,
+                    "image_path": generated_file,
+                    "message": "Plotly chart generated successfully."
+                })
+        else:
+            return f"Code executed but no chart was saved. Did you forget `fig.write_image(...)` or `fig.write_html(...)`? Output: {output}"
+        
+    except Exception as e:
+        print(f"Error in generate_plotly_chart: {str(e)}")
+        traceback.print_exc()
+        return f"Error generating Plotly chart: {str(e)}"
 
 def get_timezone_from_ip(ip_address: str) -> Optional[str]:
     """
@@ -1599,7 +1708,10 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 current_instruction += "\n\n- You have access to an 'execute_calculation' tool. Use it for math, logic, text processing, or data analysis (numpy/pandas) or any arbitray python code executions. It returns TEXT output. It CANNOT generate images."
 
                 tools.append(generate_chart)
-                current_instruction += "\n\n- You have access to a 'generate_chart' tool. **CRITICAL**: You MUST use this tool for ANY visualization request (charts, graphs, plots, diagrams). DO NOT provide Python code to the user. DO NOT use execute_calculation for charts. ALWAYS call 'generate_chart' when the user asks for any kind of visual representation of data. If you provide code instead of calling the tool, you have FAILED."
+                current_instruction += "\n\n- You have access to a 'generate_chart' tool using matplotlib. Use this for standard charts (bar, line, pie, scatter, histograms). DO NOT provide Python code to the user - ALWAYS call the tool."
+
+                tools.append(generate_plotly_chart)
+                current_instruction += "\n\n- You have access to a 'generate_plotly_chart' tool using Plotly. Use this for ADVANCED visualizations: 3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps. Use this when matplotlib's generate_chart cannot handle the request."
 
                 tools.append(generate_image)
                 current_instruction += "\n\n- You have access to a 'generate_image' tool. Use it for artistic or creative image requests like 'draw a cat', 'create a sunset landscape', etc. DO NOT use this for data visualizations - use generate_chart instead."
@@ -1766,6 +1878,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                 api_response = execute_calculation(fn_args.get("code"))
                             elif fn_name == "generate_chart":
                                 api_response = generate_chart(fn_args.get("code"))
+                            elif fn_name == "generate_plotly_chart":
+                                api_response = generate_plotly_chart(fn_args.get("code"))
                             elif fn_name == "generate_image":
                                 api_response = generate_image(fn_args.get("description"))
                             elif fn_name == "get_current_datetime":
@@ -1802,7 +1916,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             save_message(session_id, "model", fc_json)
                         
                             # Display code block for code execution tools
-                            if fn_name in ["execute_calculation", "generate_chart"]:
+                            if fn_name in ["execute_calculation", "generate_chart", "generate_plotly_chart"]:
                                 code = fn_args.get("code", "")
                                 if code:
                                     # Use OOB swap to insert the code block before the streaming response
@@ -1923,8 +2037,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             })
                             save_message(session_id, "function", fr_json)
                         
-                            # CHART DISPLAY: If a chart was generated, display it directly
-                            if fn_name == "generate_chart":
+                            # CHART DISPLAY: If a chart was generated (matplotlib or plotly), display it directly
+                            if fn_name in ["generate_chart", "generate_plotly_chart"]:
                                 try:
                                     # Check if response is valid JSON
                                     try:
@@ -1933,21 +2047,38 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                         print(f"Warning: generate_chart returned non-JSON response: {api_response}")
                                         resp_data = None
                                         
-                                    if isinstance(resp_data, dict) and "image_path" in resp_data:
-                                        chart_path = resp_data["image_path"]
-                                        print(f"Chart generated at {chart_path}.")
+                                    if isinstance(resp_data, dict):
+                                        if "image_path" in resp_data:
+                                            # PNG image - display inline
+                                            chart_path = resp_data["image_path"]
+                                            print(f"Chart generated at {chart_path}.")
+                                            
+                                            # Display chart to user immediately
+                                            yield format_sse(f'<div class="mb-2"><img src="{chart_path}" alt="Generated Chart" class="max-w-full h-auto rounded-lg shadow-md"/></div>')
+                                            
+                                            # Set response text for history
+                                            full_response_text = f"![Generated Chart]({chart_path})\n\n*Chart generated successfully.*"
+                                            
+                                            # Notify UI
+                                            yield format_sse(f'<div class="text-xs text-gray-500 mb-2 italic">Chart generated successfully.</div>')
+                                            
+                                            # Break - chart is displayed
+                                            break
                                         
-                                        # Display chart to user immediately
-                                        yield format_sse(f'<div class="mb-2"><img src="{chart_path}" alt="Generated Chart" class="max-w-full h-auto rounded-lg shadow-md"/></div>')
-                                        
-                                        # Set response text for history
-                                        full_response_text = f"![Generated Chart]({chart_path})\n\n*Chart generated successfully.*"
-                                        
-                                        # Notify UI
-                                        yield format_sse(f'<div class="text-xs text-gray-500 mb-2 italic">Chart generated successfully.</div>')
-                                        
-                                        # Break - chart is displayed
-                                        break
+                                        elif "html_path" in resp_data:
+                                            # HTML file - display link (can't embed)
+                                            html_path = resp_data["html_path"]
+                                            message = resp_data.get("message", f'<a href="{html_path}" onclick="event.stopPropagation(); event.preventDefault(); window.open(this.href, \'_blank\'); return false;">🔗 Open interactive chart</a>')
+                                            print(f"Interactive chart generated at {html_path}.")
+                                            
+                                            # Display link to user
+                                            yield format_sse(f'<div class="mb-2 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">{message}</div>')
+                                            
+                                            # Set response text for history
+                                            full_response_text = f"Interactive Plotly chart generated: [{html_path}]({html_path})"
+                                            
+                                            # Break - link is displayed
+                                            break
                                         
                                 except Exception as e:
                                     print(f"Error displaying chart: {e}")
