@@ -82,6 +82,7 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
     TAVILY_API_KEY=your_tavily_api_key_here
     XWEATHER_MCP_ID=your_xweather_client_id_here
     XWEATHER_MCP_SECRET=your_xweather_client_secret_here
+    WOLFRAM_ALPHA_APP_ID=your_wolfram_alpha_app_id_here
     ```
     
     **Note:** XWeather credentials are optional. If not provided, weather-related tools will not be available.
@@ -162,13 +163,14 @@ The chatbot has access to the following tools:
 3.  **`execute_calculation(code)`**: Executes Python code (numpy/pandas) for math/logic.
 4.  **`generate_chart(code)`**: Creates standard visualizations using matplotlib (bar, line, pie, scatter, histograms).
 5.  **`generate_plotly_chart(code)`**: Creates advanced visualizations using Plotly (3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps).
-6.  **`generate_image(description)`**: Generates artistic images via Pollinations.ai.
-7.  **`get_current_datetime(timezone)`**: Returns current date/time (timezone-aware).
-8.  **`get_user_timezone()`**: Returns the user's detected timezone.
-9.  **`get_coordinates(location)`**: Returns latitude/longitude for a location.
-10. **`get_weather(location)`**: Returns current weather for a location via XWeather MCP.
-11. **`get_forecast_weather(location)`**: Returns multi-day weather forecast via XWeather MCP.
-12. **`get_precipitation_timing(location)`**: Returns rain/snow start/stop timing via XWeather MCP.
+6.  **`wolfram_alpha_query(query)`**: Queries Wolfram Alpha for complex math, scientific data, unit conversions, and facts.
+7.  **`generate_image(description)`**: Generates artistic images via Pollinations.ai.
+8.  **`get_current_datetime(timezone)`**: Returns current date/time (timezone-aware).
+9.  **`get_user_timezone()`**: Returns the user's detected timezone.
+10. **`get_coordinates(location)`**: Returns latitude/longitude for a location.
+11. **`get_weather(location)`**: Returns current weather for a location via XWeather MCP.
+12. **`get_forecast_weather(location)`**: Returns multi-day weather forecast via XWeather MCP.
+13. **`get_precipitation_timing(location)`**: Returns rain/snow start/stop timing via XWeather MCP.
 
 ## Troubleshooting
 

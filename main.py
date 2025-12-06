@@ -1180,6 +1180,38 @@ def generate_plotly_chart(code: str):
         traceback.print_exc()
         return f"Error generating Plotly chart: {str(e)}"
 
+def wolfram_alpha_query(query: str):
+    """
+    Queries the Wolfram Alpha LLM API for scientific, mathematical, or factual information.
+    Use this tool for:
+    - Complex math calculations (integrals, derivatives, solving equations)
+    - Scientific data (chemistry, physics, astronomy)
+    - Unit conversions and physical constants
+    - Factual queries about geography, history, etc.
+    
+    The query should be a single-line natural language string or math expression.
+    """
+    app_id = os.getenv("WOLFRAM_ALPHA_APP_ID")
+    if not app_id:
+        return "Error: WOLFRAM_ALPHA_APP_ID not found in environment variables."
+        
+    base_url = "https://www.wolframalpha.com/api/v1/llm-api"
+    
+    try:
+        params = {
+            "appid": app_id,
+            "input": query
+        }
+        url = f"{base_url}?{urllib.parse.urlencode(params)}"
+        print(f"Querying Wolfram Alpha: {url}")
+        
+        with urllib.request.urlopen(url) as response:
+            return response.read().decode('utf-8')
+            
+    except Exception as e:
+        print(f"Error querying Wolfram Alpha: {str(e)}")
+        return f"Error querying Wolfram Alpha: {str(e)}"
+
 def get_timezone_from_ip(ip_address: str) -> Optional[str]:
     """
     Fetches the timezone for a given IP address using ip-api.com.
@@ -1737,6 +1769,17 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 tools.append(generate_plotly_chart)
                 current_instruction += "\n\n- You have access to a 'generate_plotly_chart' tool using Plotly. Use this for ADVANCED visualizations: 3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps. Use this when matplotlib's generate_chart cannot handle the request."
 
+                tools.append(wolfram_alpha_query)
+                current_instruction += """\n\n- You have access to a 'wolfram_alpha_query' tool. Use it for complex math, scientific data, unit conversions, and factual queries.
+GUIDELINES:
+- Convert inputs to simplified keyword queries (e.g. "France population" instead of "how many people live in France").
+- Send queries in English only.
+- Use proper Markdown for math formulas: '$$...$$' for block, '\\(...\\)' for inline.
+- Use named physical constants (e.g., 'speed of light') without numerical substitution.
+- Include a space between compound units (e.g., "Ω m").
+- If data for multiple properties is needed, make separate calls for each property.
+- If the result is not relevant, try re-sending with 'Assumption' parameters if suggested by Wolfram."""
+
                 tools.append(generate_image)
                 current_instruction += "\n\n- You have access to a 'generate_image' tool. Use it for artistic or creative image requests like 'draw a cat', 'create a sunset landscape', etc. DO NOT use this for data visualizations - use generate_chart instead."
 
@@ -1919,6 +1962,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                 api_response = get_forecast_weather(fn_args.get("location"))
                             elif fn_name == "get_precipitation_timing":
                                 api_response = get_precipitation_timing(fn_args.get("location"))
+                            elif fn_name == "wolfram_alpha_query":
+                                api_response = wolfram_alpha_query(fn_args.get("query"))
                             else:
                                 api_response = f"Error: Unknown tool '{fn_name}'"
                                 
