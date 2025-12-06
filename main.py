@@ -1075,10 +1075,9 @@ def generate_plotly_chart(code: str):
     - Geographic/map visualizations
     
     IMPORTANT:
-    - You MUST save the figure using `fig.write_image('plot.png')` or `fig.write_html('plot.html')`.
-    - For write_image, install kaleido: pip install kaleido
-    - The tool will return the path to the generated image/HTML.
-    - in case of an HTML file, show the location of the file in the response.
+    - You MUST assign the figure to a variable named `fig`.
+    - The tool will automatically save `fig` as both a static PNG (for preview) and an interactive HTML file.
+    - You do NOT need to call `fig.write_image` or `fig.write_html` yourself, but you can if you want specific filenames.
     - Use `import plotly.express as px` or `import plotly.graph_objects as go`.
     """
     # Ensure generated directory exists
@@ -1091,65 +1090,90 @@ def generate_plotly_chart(code: str):
         # Redirect stdout
         with contextlib.redirect_stdout(output_capture):
             # Execute the code
-            exec(code, {
+            local_vars = {
                 '__builtins__': __builtins__, 
                 'np': np, 
                 'pd': pd, 
                 'px': px, 
                 'go': go,
                 'pio': pio
-            })
+            }
+            exec(code, local_vars)
             
-        # Check for generated files (PNG or HTML)
-        generated_file = None
+        # Check for generated files (PNG or HTML) created manually by the code
+        generated_png = None
+        generated_html = None
         
-        # First, check if any PNG or HTML files were created in current directory
-        for file in os.listdir('.'):
-            if file.endswith(('.png', '.html')):
-                # Move to static/generated
-                ext = os.path.splitext(file)[1]
-                new_filename = f"plotly_chart_{uuid.uuid4()}{ext}"
-                dest_path = os.path.join(GENERATED_DIR, new_filename)
-                shutil.move(file, dest_path)
-                generated_file = f"/static/generated/{new_filename}"
-                print(f"Found and moved chart: {file} -> {dest_path}")
-                break
-        
+        # Also check if 'fig' exists in locals and auto-save if needed
+        fig = local_vars.get('fig')
+        if fig:
+            # Auto-save logic
+            base_uuid = str(uuid.uuid4())
+            
+            # Save PNG
+            png_filename = f"plotly_chart_{base_uuid}.png"
+            png_dest = os.path.join(GENERATED_DIR, png_filename)
+            fig.write_image(png_dest)
+            generated_png = f"/static/generated/{png_filename}"
+            print(f"Auto-saved Plotly PNG: {png_dest}")
+            
+            # Save HTML
+            html_filename = f"plotly_chart_{base_uuid}.html"
+            html_dest = os.path.join(GENERATED_DIR, html_filename)
+            fig.write_html(html_dest)
+            generated_html = f"/static/generated/{html_filename}"
+            print(f"Auto-saved Plotly HTML: {html_dest}")
+            
+        else:
+            # Fallback: check if files were created manually in current directory
+            for file in os.listdir('.'):
+                if file.endswith('.png') and 'plotly' in file: # loose check
+                     # Move to static/generated
+                    new_filename = f"plotly_chart_{uuid.uuid4()}.png"
+                    dest_path = os.path.join(GENERATED_DIR, new_filename)
+                    shutil.move(file, dest_path)
+                    generated_png = f"/static/generated/{new_filename}"
+                    
+                elif file.endswith('.html') and 'plotly' in file:
+                    new_filename = f"plotly_chart_{uuid.uuid4()}.html"
+                    dest_path = os.path.join(GENERATED_DIR, new_filename)
+                    shutil.move(file, dest_path)
+                    generated_html = f"/static/generated/{new_filename}"
+
         output = output_capture.getvalue().strip()
         
-        if generated_file:
+        if generated_png or generated_html:
             # Save to database if session_id is available
             session_id = session_id_ctx.get()
             if session_id:
                 try:
                     with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
-                        conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, dest_path))
-                        print(f"Saved generated file record for session {session_id}: {dest_path}")
+                        if generated_png:
+                            conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(generated_png))))
+                        if generated_html:
+                            conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(generated_html))))
                 except Exception as db_e:
                     print(f"Error saving generated file to DB: {db_e}")
 
-            # Check if HTML or PNG
-            is_html = generated_file.endswith('.html')
+            # Construct response
+            response_data = {
+                "status": "success",
+                "output": output,
+                "message": "Plotly chart generated successfully."
+            }
             
-            if is_html:
-                # For HTML files, return a clickable link (can't embed HTML in response)
-                # Note: onclick with window.open forces new window/tab
-                return json.dumps({
-                    "status": "success",
-                    "output": output,
-                    "html_path": generated_file,
-                    "message": f'Interactive Plotly chart generated. <a href="{generated_file}" onclick="event.stopPropagation(); event.preventDefault(); window.open(this.href, \'_blank\'); return false;" class="text-blue-500 hover:underline">🔗 Open chart in new tab</a>'
-                })
-            else:
-                # For PNG files, return image_path for embedding
-                return json.dumps({
-                    "status": "success",
-                    "output": output,
-                    "image_path": generated_file,
-                    "message": "Plotly chart generated successfully."
-                })
+            if generated_png:
+                response_data["image_path"] = generated_png
+            
+            if generated_html:
+                response_data["html_path"] = generated_html
+                # Add the link message
+                link_msg = f'Interactive Plotly chart generated. <a href="{generated_html}" onclick="event.stopPropagation(); event.preventDefault(); window.open(this.href, \'_blank\'); return false;" class="text-blue-500 hover:underline">🔗 Open chart in new tab</a>'
+                response_data["message"] = link_msg
+
+            return json.dumps(response_data)
         else:
-            return f"Code executed but no chart was saved. Did you forget `fig.write_image(...)` or `fig.write_html(...)`? Output: {output}"
+            return f"Code executed but no chart was saved. Did you assign the figure to `fig`? Output: {output}"
         
     except Exception as e:
         print(f"Error in generate_plotly_chart: {str(e)}")
@@ -2048,36 +2072,41 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                         resp_data = None
                                         
                                     if isinstance(resp_data, dict):
+                                        # Initialize response text components
+                                        history_parts = []
+                                        
+                                        # 1. Handle PNG Image (Preview)
                                         if "image_path" in resp_data:
-                                            # PNG image - display inline
                                             chart_path = resp_data["image_path"]
                                             print(f"Chart generated at {chart_path}.")
                                             
                                             # Display chart to user immediately
                                             yield format_sse(f'<div class="mb-2"><img src="{chart_path}" alt="Generated Chart" class="max-w-full h-auto rounded-lg shadow-md"/></div>')
                                             
-                                            # Set response text for history
-                                            full_response_text = f"![Generated Chart]({chart_path})\n\n*Chart generated successfully.*"
-                                            
-                                            # Notify UI
-                                            yield format_sse(f'<div class="text-xs text-gray-500 mb-2 italic">Chart generated successfully.</div>')
-                                            
-                                            # Break - chart is displayed
-                                            break
+                                            history_parts.append(f"![Generated Chart]({chart_path})")
                                         
-                                        elif "html_path" in resp_data:
-                                            # HTML file - display link (can't embed)
+                                        # 2. Handle HTML Link (Interactive)
+                                        if "html_path" in resp_data:
                                             html_path = resp_data["html_path"]
-                                            message = resp_data.get("message", f'<a href="{html_path}" onclick="event.stopPropagation(); event.preventDefault(); window.open(this.href, \'_blank\'); return false;">🔗 Open interactive chart</a>')
+                                            # Use the message from response if available (contains the styled link), or create one
+                                            message = resp_data.get("message", f'<a href="{html_path}" onclick="event.stopPropagation(); event.preventDefault(); window.open(this.href, \'_blank\'); return false;" class="text-blue-500 hover:underline">🔗 Open interactive chart</a>')
                                             print(f"Interactive chart generated at {html_path}.")
                                             
                                             # Display link to user
                                             yield format_sse(f'<div class="mb-2 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">{message}</div>')
                                             
-                                            # Set response text for history
-                                            full_response_text = f"Interactive Plotly chart generated: [{html_path}]({html_path})"
+                                            # Add to history (using special syntax we added preprocessing for, or just a link)
+                                            # We'll use the link format since we have the image above
+                                            history_parts.append(f"\nInteractive Version: [{html_path}]({html_path})")
+                                        
+                                        # 3. Finalize
+                                        if history_parts:
+                                            full_response_text = "\n".join(history_parts) + "\n\n*Chart generated successfully.*"
                                             
-                                            # Break - link is displayed
+                                            # Notify UI
+                                            yield format_sse(f'<div class="text-xs text-gray-500 mb-2 italic">Chart generated successfully.</div>')
+                                            
+                                            # Break - chart/link is displayed
                                             break
                                         
                                 except Exception as e:

@@ -16,6 +16,10 @@ chat.db-shm
 chat.db-wal
 static/uploads/
 static/generated/
+static/generated_code
+
+# 
+*.html
 
 # Tests
 test_data/
