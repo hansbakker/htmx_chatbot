@@ -76,13 +76,14 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 
 4.  **Configure Environment:**
     Create a `.env` file in the root directory:
-
     ```ini
     GEMINI_API_KEY=your_gemini_api_key_here
     TAVILY_API_KEY=your_tavily_api_key_here
     XWEATHER_MCP_ID=your_xweather_client_id_here
     XWEATHER_MCP_SECRET=your_xweather_client_secret_here
     WOLFRAM_ALPHA_APP_ID=your_wolfram_alpha_app_id_here
+    # Optional: Select Provider (defaults to gemini)
+    LLM_PROVIDER=gemini
     ```
     
     **Note:** XWeather credentials are optional. If not provided, weather-related tools will not be available.
@@ -92,6 +93,10 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 ```text
 .
 ├── main.py                 # FastAPI server, session logic, tools, and SSE generator
+├── providers/              # LLM Provider Abstraction Layer
+│   ├── base.py             # Abstract Base Class (LLMProvider)
+│   ├── gemini.py           # Google Gemini Implementation
+│   └── factory.py          # Provider Factory
 ├── .env                    # API Key configuration
 ├── requirements.txt        # Python dependencies
 ├── system_instruction.txt  # Persisted system prompt (persona)
@@ -136,6 +141,7 @@ uvicorn main:app --reload
     *   Client loads `index.html`.
     *   Server assigns a `session_id` cookie if missing.
     *   Server loads chat history from `chat.db`.
+    *   **Provider Factory:** Server initializes the configured LLM provider (default: Gemini) via `providers.factory.get_llm_provider`.
 
 2.  **User Submission:**
     *   HTMX sends a `POST /chat` (multipart/form-data for files).
@@ -144,7 +150,7 @@ uvicorn main:app --reload
 
 3.  **Streaming (SSE) & Tools:**
     *   Browser connects to the `/stream` endpoint.
-    *   Server initializes Gemini with tools (`search_web`, `execute_calculation`, `generate_chart`, `generate_image`, `get_current_datetime`, `get_user_timezone`, `get_coordinates`).
+    *   Server uses the abstract `llm_provider` interface to generate responses.
     *   **Function Calling:** If the model calls a tool, the server executes it (e.g., generates a chart, searches the web), feeds the result back to the model, and streams the final answer.
     *   **Timezone Detection:** Client IP is captured and used for automatic timezone detection in datetime queries.
     *   **Retries:** Automatic retries for empty responses or transient errors.

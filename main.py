@@ -32,6 +32,9 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 import google.generativeai as genai
 from google.api_core.exceptions import ResourceExhausted
+
+# Custom Providers
+from providers.gemini import GeminiProvider
 from tavily import TavilyClient
 import urllib.parse
 import json
@@ -86,13 +89,34 @@ RETRY_PHRASES = [
     "here we go"
 ]
 
+# Custom Providers
+from providers.factory import get_llm_provider
+from tavily import TavilyClient
+import urllib.parse
+import json
+import uuid
+import asyncio
+import traceback
+from contextlib import asynccontextmanager
+import io
+
 # --- 1. CONFIGURATION ---
 load_dotenv()
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 # Remove global model instantiation to allow dynamic system instructions
-# Configure Gemini
-# Configure Gemini
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+# Initialize Providers
+llm_provider = None
+# Default to Gemini for now, but this could come from config/env
+active_provider_name = os.getenv("LLM_PROVIDER", "gemini")
+
+if active_provider_name:
+    try:
+        llm_provider = get_llm_provider(active_provider_name)
+    except Exception as e:
+        print(f"Error initializing {active_provider_name} provider: {e}")
+
+# Initialize Tavily Client
+tavily_api_key = os.getenv("TAVILY_API_KEY")
+tavily_client = TavilyClient(api_key=tavily_api_key) if tavily_api_key else None
 
 # Configure Matplotlib for headless environment
 try:
@@ -1680,15 +1704,15 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 local_path = image_path.lstrip("/")
                 
                 try:
-                    # Upload to Gemini
-                    print(f"Uploading file to Gemini: {local_path} ({mime_type})")
-                    uploaded_file = genai.upload_file(local_path, mime_type=mime_type)
+                    # Upload to Provider
+                    print(f"Uploading file to Provider: {local_path} ({mime_type})")
+                    if llm_provider:
+                        uploaded_file = await llm_provider.upload_file(local_path, mime_type=mime_type, wait_for_active=True)
+                    else:
+                        raise ValueError("LLM Provider not initialized")
                     
-                    # Wait for processing if needed (mostly for videos, but good practice)
-                    while uploaded_file.state.name == "PROCESSING":
-                        print("Waiting for file processing...")
-                        await asyncio.sleep(1)
-                        uploaded_file = genai.get_file(uploaded_file.name)
+                    # Wait for processing is now handled by provider
+                    # while uploaded_file.state.name == "PROCESSING": ...
                         
                     if uploaded_file.state.name == "FAILED":
                         yield format_sse("<div><strong>Error:</strong> File processing failed.</div>")
@@ -1771,14 +1795,14 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
 
                 tools.append(wolfram_alpha_query)
                 current_instruction += """\n\n- You have access to a 'wolfram_alpha_query' tool. Use it for complex math, scientific data, unit conversions, and factual queries.
-GUIDELINES:
-- Convert inputs to simplified keyword queries (e.g. "France population" instead of "how many people live in France").
-- Send queries in English only.
-- Use proper Markdown for math formulas: '$$...$$' for block, '\\(...\\)' for inline.
-- Use named physical constants (e.g., 'speed of light') without numerical substitution.
-- Include a space between compound units (e.g., "Ω m").
-- If data for multiple properties is needed, make separate calls for each property.
-- If the result is not relevant, try re-sending with 'Assumption' parameters if suggested by Wolfram."""
+                    GUIDELINES:
+                        - Convert inputs to simplified keyword queries (e.g. "France population" instead of "how many people live in France").
+                        - Send queries in English only.
+                        - Use proper Markdown for math formulas: '$$...$$' for block, '\\(...\\)' for inline.
+                        - Use named physical constants (e.g., 'speed of light') without numerical substitution.
+                        - Include a space between compound units (e.g., "Ω m").
+                        - If data for multiple properties is needed, make separate calls for each property.
+                        - If the result is not relevant, try re-sending with 'Assumption' parameters if suggested by Wolfram."""
 
                 tools.append(generate_image)
                 current_instruction += "\n\n- You have access to a 'generate_image' tool. Use it for artistic or creative image requests like 'draw a cat', 'create a sunset landscape', etc. DO NOT use this for data visualizations - use generate_chart instead."
@@ -1818,11 +1842,7 @@ GUIDELINES:
             tool_names = [t.__name__ if hasattr(t, '__name__') else str(t) for t in tools]
             print(f"Registered tools: {tool_names}")
 
-            model = genai.GenerativeModel(
-                model_name=selected_model,
-                system_instruction=current_instruction,
-                tools=tools if tools else None
-            )
+            # model = genai.GenerativeModel(...) - REMOVED
             
             # We need to handle potential function calls in a loop
             # Since we are streaming, this is a bit tricky with the official SDK's generate_content(stream=True)
@@ -1856,7 +1876,18 @@ GUIDELINES:
                     max_retries = 3
                     for attempt in range(max_retries):
                         try:
-                            response = model.generate_content(messages_payload, stream=False)
+                            if llm_provider:
+                                response = await llm_provider.generate(
+                                    model_name=selected_model,
+                                    messages=messages_payload,
+                                    tools=tools if tools else None,
+                                    system_instruction=current_instruction,
+                                    stream=False
+                                )
+                            else:
+                                raise ValueError("LLM Provider not initialized")
+                                
+                            # Check if valid
                             # Check if valid
                             if response.candidates and response.candidates[0].content.parts:
                                 break # Success
