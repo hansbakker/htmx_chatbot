@@ -1,6 +1,6 @@
 
 
-# HTMX + FastAPI + Gemini Streaming Chatbot
+# HTMX + FastAPI + Gemini/OpenAI Streaming Chatbot
 
 A lightweight, high-performance LLM chatbot implementation using **HTMX** for the frontend and **FastAPI** for the backend. This project demonstrates real-time text streaming via **Server-Sent Events (SSE)** and includes a modern, responsive UI built with **Tailwind CSS**.
 
