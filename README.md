@@ -11,7 +11,7 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 *   **Modern UI:** Clean, responsive interface with distinct user/bot message styling and animations.
 *   **Dark Mode:** Toggle between light and dark themes with persistent preference storage.
 *   **Chat History & Sidebar:**
-    *   Sidebar navigation showing all previous conversations.
+    *   Sidebar navigation showing all previous conversations, accessible on mobile via a responsive drawer overlay.
     *   **Context Menu:** Rename, Archive, or Delete chats directly from the sidebar.
     *   Auto-saved chat sessions with smart naming based on first message.
     *   Easy switching between conversations.

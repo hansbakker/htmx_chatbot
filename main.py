@@ -47,7 +47,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 # import pandas as pd
-
+import pandas as pd
 # Configure Plotly
 import plotly.express as px
 import plotly.graph_objects as go
@@ -74,7 +74,7 @@ RETRY_PHRASES = [
     "working on it",
     "one moment",
     "give me a moment",
-    "let me fix",
+    "let me ",
     "i'll fix",
     "i will fix",
     "i'll adjust",
@@ -84,7 +84,8 @@ RETRY_PHRASES = [
     "i will",
     "stand by",
     "might take a few moments",
-    "here we go"
+    "here we go",
+    "let's"
 ]
 
 # Custom Providers
@@ -115,19 +116,6 @@ if active_provider_name:
 # Initialize Tavily Client
 tavily_api_key = os.getenv("TAVILY_API_KEY")
 tavily_client = TavilyClient(api_key=tavily_api_key) if tavily_api_key else None
-
-# Configure Matplotlib for headless environment
-try:
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import pandas as pd
-except ImportError:
-    plt = None
-    np = None
-    pd = None
-    print("Warning: matplotlib, numpy, or pandas not installed. Chart generation will be unavailable.")
 
 # Configure Tavily
 tavily_client = None
@@ -369,8 +357,16 @@ def get_history(session_id: str) -> List[Dict[str, str]]:
                 )
             )
         elif image_path:
-            # Fallback: We have a local path but no URI. 
-            pass
+            # Fallback for providers that don't use Gemini File API (e.g. OpenAI)
+            # We treat the local path as the URI for internal processing
+            parts.append(
+                genai.protos.Part(
+                    file_data=genai.protos.FileData(
+                        mime_type=mime_type,
+                        file_uri=image_path 
+                    )
+                )
+            )
 
         history.append({"role": role, "parts": parts})
     return history
@@ -521,11 +517,20 @@ async def get_home(request: Request, response: Response):
     # Fetch previous conversations
     conversations = get_conversations()
 
+    # Get current chat title
+    current_chat_title = "New Chat"
+    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+        cursor = conn.execute("SELECT title FROM conversations WHERE id = ?", (session_id,))
+        result = cursor.fetchone()
+        if result:
+            current_chat_title = result[0]
+
     response = templates.TemplateResponse("index.html", {
         "request": request, 
         "chat_history": chat_history_html,
         "conversations": conversations,
-        "current_session_id": session_id
+        "current_session_id": session_id,
+        "current_chat_title": current_chat_title
     })
     
     # Set cookie if it was missing
@@ -860,6 +865,7 @@ def write_source_code(file_path: str, code: str):
     """
     try:
         if file_path!="main.py":
+            file_path = './static/generated_code/' + file_path
             with open(file_path, 'w') as f:
                 print(f"Writing file {file_path}")
                 f.write(code)
@@ -881,6 +887,7 @@ def read_source_code(file_path: str):
     """
     try:
         if file_path!="main.py":
+            file_path = './static/generated_code/' + file_path
             with open(file_path, 'r') as f:
                 print(f"Reading file {file_path}")
                 code = f.read()
@@ -890,7 +897,31 @@ def read_source_code(file_path: str):
     except Exception as e:
         return f"Error reading file {file_path}: {e}"
 
-  
+
+def read_uploaded_file(file_name: str):
+    """
+    Reads the contents of a previously uploaded file from the static/uploads directory.
+    Use this tool when you need to read a file that was uploaded by the user.
+    Args:
+        file_name (str): The name of the file to read (e.g., "data.csv"). Do not include the path.
+
+    Returns:
+        str: The contents of the file.
+    """
+    try:
+        # Sanitize input to prevent directory traversal
+        file_name = os.path.basename(file_name)
+        file_path = os.path.join("static/uploads", file_name)
+        
+        if not os.path.exists(file_path):
+            return f"Error: File '{file_name}' not found in uploads."
+            
+        with open(file_path, 'r', encoding='utf-8') as f:
+            print(f"Reading uploaded file {file_path}")
+            return f.read()
+    except Exception as e:
+        return f"Error reading uploaded file {file_name}: {e}"
+
 
 def search_web(query: str):
     """
@@ -1712,12 +1743,19 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                     # Wait for processing is now handled by provider
                     # while uploaded_file.state.name == "PROCESSING": ...
                         
-                    if uploaded_file.state.name == "FAILED":
-                        yield format_sse("<div><strong>Error:</strong> File processing failed.</div>")
-                        return
+                    # Handle different return types (Gemini vs OpenAI)
+                    if hasattr(uploaded_file, "state") and uploaded_file.state.name == "FAILED":
+                         yield format_sse("<div><strong>Error:</strong> File processing failed.</div>")
+                         return
+                    elif isinstance(uploaded_file, dict) and "error" in uploaded_file:
+                         yield format_sse(f"<div><strong>Error:</strong> {uploaded_file['error']}</div>")
+                         return
 
                     current_parts.append(uploaded_file)
-                    print(f"File uploaded successfully: {uploaded_file.uri}")
+                    
+                    # Log URI if available
+                    uri_log = getattr(uploaded_file, "uri", "local_file_only")
+                    print(f"File uploaded successfully: {uri_log}")
                     
                     # Update the message in DB with the Gemini URI for future context
                     # We need to find the message ID. Since we don't have it easily (it was just inserted),
@@ -1735,7 +1773,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                     ORDER BY id DESC LIMIT 1
                                 )
                                 """,
-                                (uploaded_file.uri, session_id, image_path)
+                                (getattr(uploaded_file, "uri", None), session_id, image_path)
                             )
                     
                 except Exception as e:
@@ -1776,6 +1814,9 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 tools.append(read_source_code)
                 current_instruction += "\n\n- You have access to a 'read_source_code' tool. Use it for reading your own source code files. It returns TEXT output. It CANNOT generate images."
                 
+                tools.append(read_uploaded_file)
+                current_instruction += "\n\n- You have access to a 'read_uploaded_file' tool. Use it to see the text content of files that were previously uploaded to the uploads folder. It returns the raw text content."
+
                 tools.append(write_source_code)
                 current_instruction += "\n\n- You have access to a 'write_source_code' tool. Use it for writing (modified) source code to file. It returns TEXT output. It CANNOT generate images."
 
@@ -1854,7 +1895,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 
                 # Main loop for handling function calls
                 turn = 0
-                max_turns = 10
+                max_turns = 20
                 full_response_text = ""  # Initialize to prevent UnboundLocalError
             
                 while turn < max_turns:
@@ -1963,6 +2004,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                 )
                             elif fn_name == "read_source_code":
                                 api_response = read_source_code(fn_args.get("file_path"))
+                            elif fn_name == "read_uploaded_file":
+                                api_response = read_uploaded_file(fn_args.get("file_name"))
                             elif fn_name == "write_source_code":
                                 api_response = write_source_code(fn_args.get("file_path"), fn_args.get("code"))
                             elif fn_name == "import_package":
@@ -2251,8 +2294,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             save_message(session_id, "model", full_response_text)
             
             # 5. Check for auto-continue (retry phrases)
-            # Get last 100 chars and check for retry phrases
-            response_end = full_response_text[-100:].lower() if len(full_response_text) > 100 else full_response_text.lower()
+            # Get last 120 chars and check for retry phrases
+            response_end = full_response_text[-120:].lower() if len(full_response_text) > 120 else full_response_text.lower()
             
             for phrase in RETRY_PHRASES:
                 if phrase in response_end:

@@ -1,5 +1,6 @@
 import os
 import json
+import base64
 from typing import List, Dict, Any, AsyncGenerator, Optional
 from .base import LLMProvider
 from .utils import function_to_openai_tool
@@ -16,12 +17,17 @@ class OpenAIProvider(LLMProvider):
 
     async def upload_file(self, file_path: str, mime_type: str, wait_for_active: bool = True) -> Any:
         """
-        OpenAI doesn't have a direct equivalent to Gemini's generic file upload for all models.
-        For now, we'll raise an error or return a placeholder.
+        OpenAI handles images via base64 encoded strings in the message content (Vision).
+        For other files (PDF, CSV), we'll currently return a placeholder or raw text if possible,
+        but for now we focus on images.
         """
-        # TODO: Implement file upload for OpenAI (e.g. for Code Interpreter or Vision)
-        print(f"Warning: File upload not fully supported for OpenAI provider yet. Path: {file_path}")
-        return {"file_path": file_path, "mime_type": mime_type}
+        try:
+            with open(file_path, "rb") as image_file:
+                encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+            return {"mime_type": mime_type, "data": encoded_string}
+        except Exception as e:
+            print(f"Error reading file {file_path}: {e}")
+            return {"error": str(e)}
 
     def _convert_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         openai_messages = []
@@ -55,12 +61,45 @@ class OpenAIProvider(LLMProvider):
                     })
                 pending_tool_calls = []
 
-            content = ""
+            # OpenAI 'content' can be a string or a list of parts (for multimodal)
+            message_content_parts = []
+            
             tool_calls = []
             
             for part in parts:
                 if isinstance(part, str):
-                    content += part
+                    if part.strip():
+                        message_content_parts.append({"type": "text", "text": part})
+                elif isinstance(part, dict) and "data" in part and "mime_type" in part:
+                    # Specific handling for our upload_file return dictionary
+                    mime = part["mime_type"]
+                    b64_data = part["data"]
+                    
+                    if mime.startswith("image/"):
+                         message_content_parts.append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime};base64,{b64_data}"
+                            }
+                        })
+                    elif mime.startswith("text/") or mime in ["application/json", "application/xml", "application/javascript", "application/x-python-code"]:
+                        try:
+                            # Decode text content and inject
+                            text_content = base64.b64decode(b64_data).decode('utf-8')
+                            # Truncate if too huge? Let's rely on model limits for now or trunc at reasonable limit (e.g. 100k chars)
+                            if len(text_content) > 100000:
+                                text_content = text_content[:100000] + "\n... (truncated)"
+                                
+                            message_content_parts.append({
+                                "type": "text", 
+                                "text": f"\n[Uploaded File Content ({mime})]:\n```\n{text_content}\n```\n"
+                            })
+                        except Exception as e:
+                            print(f"Error decoding text file for OpenAI: {e}")
+                            message_content_parts.append({"type": "text", "text": f"[Error decoding text file ({mime})]"})
+                    else:
+                        message_content_parts.append({"type": "text", "text": f"[File ({mime}) - Not supported in OpenAI Chat]"})
+
                 else:
                     # Support both protos.Part and OpenAIPartAdapter (duck typing)
                     fc = getattr(part, "function_call", None)
@@ -87,9 +126,31 @@ class OpenAIProvider(LLMProvider):
                     elif fr:
                         pass # Handled below
                     elif fd:
-                        # File data
+                        # File data - Handle OpenAI Vision
                         uri = getattr(fd, "file_uri", "unknown")
-                        content += f"\n[File: {uri} (Not supported in OpenAI)]"
+                        mime = getattr(fd, "mime_type", "application/octet-stream")
+                        
+                        if mime.startswith("image/"):
+                            try:
+                                # If uri is a local path (starts with /), read and encode
+                                # If it was a web URL, we could pass it directly, but main.py gives local paths
+                                if os.path.exists(uri):
+                                    with open(uri, "rb") as img_f:
+                                        b64_data = base64.b64encode(img_f.read()).decode('utf-8')
+                                    
+                                    message_content_parts.append({
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:{mime};base64,{b64_data}"
+                                        }
+                                    })
+                                else:
+                                    message_content_parts.append({"type": "text", "text": f"[Image file missing: {uri}]"})
+                            except Exception as e:
+                                print(f"Error processing image for OpenAI: {e}")
+                                message_content_parts.append({"type": "text", "text": f"[Error reading image: {uri}]"})
+                        else:
+                            message_content_parts.append({"type": "text", "text": f"[File: {uri} ({mime}) - Not supported in OpenAI Vision]"})
             
             if role == "function":
                 # OpenAI uses role='tool'
@@ -155,17 +216,17 @@ class OpenAIProvider(LLMProvider):
                 # For Assistant messages, it can be null ONLY if tool_calls are present.
                 
                 if role == "user":
-                    # User message MUST have content
-                    msg_obj["content"] = content if content else " " # Use space if empty to be safe
+                    # User message MUST have content (string or list of parts)
+                    msg_obj["content"] = message_content_parts if message_content_parts else " " 
                 elif role == "assistant":
                     if tool_calls:
                         msg_obj["tool_calls"] = tool_calls
                         # Content can be omitted or null if tool_calls exist
-                        if content:
-                            msg_obj["content"] = content
+                        if message_content_parts:
+                            msg_obj["content"] = message_content_parts
                     else:
                         # Assistant message without tool calls MUST have content
-                        msg_obj["content"] = content if content else " "
+                        msg_obj["content"] = message_content_parts if message_content_parts else " "
                 
                 openai_messages.append(msg_obj)
         
