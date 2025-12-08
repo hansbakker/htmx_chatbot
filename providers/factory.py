@@ -19,9 +19,8 @@ def get_llm_provider(provider_name: str, **kwargs) -> LLMProvider:
     """
     if provider_name.lower() == "gemini":
         return GeminiProvider(**kwargs)
-    
-    # Future providers:
-    # elif provider_name.lower() == "anthropic":
-    #     return AnthropicProvider(**kwargs)
+    elif provider_name.lower() == "openai":
+        from .openai import OpenAIProvider
+        return OpenAIProvider(**kwargs)
     
     raise ValueError(f"Unknown provider: {provider_name}")

@@ -60,7 +60,7 @@ session_id_ctx = contextvars.ContextVar("session_id", default=None)
 # Retry phrases that trigger auto-continue (case-insensitive check)
 RETRY_PHRASES = [
     "please wait",
-    "please give me a moment",
+    "give me a moment",
     "let me try",
     "i'll try",
     "i will try",
@@ -71,8 +71,6 @@ RETRY_PHRASES = [
     "i will get",
     "i'll wait",
     "i will wait",
-    "i'll stop",
-    "i will stop",
     "working on it",
     "one moment",
     "give me a moment",
@@ -1838,9 +1836,6 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             current_instruction += """\n\n- when providing a URL make sure it's clickable, with target being a new tab"""
             current_instruction += """\n\n- when using search_web tool, remember the urls that were used"""
             
-            # Debug: Print registered tools
-            tool_names = [t.__name__ if hasattr(t, '__name__') else str(t) for t in tools]
-            print(f"Registered tools: {tool_names}")
 
             # model = genai.GenerativeModel(...) - REMOVED
             
@@ -2114,16 +2109,6 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                     # If not JSON, use as-is (error message)
                                     pass
                             
-                            # 2. Add the function response (send context-only to model for search_web)
-                            messages_payload.append({
-                                "role": "function",
-                                "parts": [{
-                                    "function_response": {
-                                        "name": fn_name,
-                                        "response": {"result": api_response}
-                                    }
-                                }]
-                            })
                             
                             # SAVE FUNCTION RESPONSE TO DB
                             # For search_web and crawl_website, save the ORIGINAL full response (with sources) to the DB
@@ -2136,6 +2121,20 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                 }
                             })
                             save_message(session_id, "function", fr_json)
+
+                            # CRITICAL FIX: Add the function response to memory for the NEXT turn
+                            # Otherwise the model doesn't see it and loops, asking for the tool again
+                            messages_payload.append({
+                                "role": "function",
+                                "parts": [
+                                    genai.protos.Part(
+                                        function_response=genai.protos.FunctionResponse(
+                                            name=fn_name,
+                                            response={"result": db_response}
+                                        )
+                                    )
+                                ]
+                            })
                         
                             # CHART DISPLAY: If a chart was generated (matplotlib or plotly), display it directly
                             if fn_name in ["generate_chart", "generate_plotly_chart"]:
@@ -2252,8 +2251,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             save_message(session_id, "model", full_response_text)
             
             # 5. Check for auto-continue (retry phrases)
-            # Get last 200 chars and check for retry phrases
-            response_end = full_response_text[-200:].lower() if len(full_response_text) > 200 else full_response_text.lower()
+            # Get last 100 chars and check for retry phrases
+            response_end = full_response_text[-100:].lower() if len(full_response_text) > 100 else full_response_text.lower()
             
             for phrase in RETRY_PHRASES:
                 if phrase in response_end:
@@ -2382,6 +2381,44 @@ def clear_file_context(session_id: str = Cookie(None)):
 @app.get("/settings/system_instruction", response_class=HTMLResponse)
 async def get_system_instruction_ui(selected_model: str = Cookie("gemini-2.5-flash")):
     instruction = get_system_instruction()
+    
+    # Generate model options dynamically based on provider
+    provider = os.getenv("LLM_PROVIDER", "gemini").lower()
+    is_openai = provider == "openai"
+    
+    if is_openai:
+        options = [
+            ("gpt-4o", "GPT-4o (Most Capable)"),
+            ("gpt-4o-mini", "GPT-4o Mini (Fastest)"),
+            ("o1-preview", "o1 Preview (Reasoning)"),
+            ("o3-mini", "o3 Mini (High Intelligence)")
+        ]
+    else:
+        options = [
+            ("gemini-2.0-flash-exp", "Gemini 2.0 Flash (Fastest)"),
+            ("gemini-2.0-flash-thinking-exp-01-21", "Gemini 2.0 Flash Thinking"),
+            ("gemini-1.5-pro", "Gemini 1.5 Pro (Balanced)"),
+            ("gemini-1.5-flash", "Gemini 1.5 Flash (Standard)")
+        ]
+    
+    # Render options HTML
+    options_html = ""
+    for val, label in options:
+        # Determine if selected. Logic: match exact value OR (if mismatched provider, default to first option)
+        is_selected = False
+        if selected_model == val:
+            is_selected = True
+        elif val == options[0][0]:
+            # Default fallback logic
+            is_gemini_model = "gemini" in selected_model
+            is_gpt_model = "gpt" in selected_model or "o1" in selected_model or "o3" in selected_model
+            
+            if (is_gemini_model and is_openai) or (is_gpt_model and not is_openai):
+                 is_selected = True
+        
+        selected_attr = 'selected' if is_selected else ''
+        options_html += f'<option value="{val}" {selected_attr}>{label}</option>'
+
     return f"""
     <div class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in" id="settings-modal">
         <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden transform transition-all border border-gray-100 dark:border-gray-700">
@@ -2406,13 +2443,10 @@ async def get_system_instruction_ui(selected_model: str = Cookie("gemini-2.5-fla
                     <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Model Selection</label>
                     <select name="model" 
                             class="w-full p-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 dark:focus:border-blue-400 transition-all text-sm text-gray-800 dark:text-gray-200">
-                        <option value="gemini-2.5-flash" {'selected' if selected_model == 'gemini-2.5-flash' else ''}>Gemini 2.5 Flash (Fastest)</option>
-                        <option value="gemini-2.5-flash-lite" {'selected' if selected_model == 'gemini-2.5-flash-lite' else ''}>Gemini 2.5 Flash Lite</option>
-                        <option value="gemini-2.5-flash-tts" {'selected' if selected_model == 'gemini-2.5-flash-tts' else ''}>Gemini 2.5 Flash TTS</option>
-                        <option value="gemini-2.5-pro" {'selected' if selected_model == 'gemini-2.5-pro' else ''}>Gemini 2.5 Pro (Balanced)</option>
-                        <option value="gemini-3-pro" {'selected' if selected_model == 'gemini-3-pro' else ''}>Gemini 3 Pro (Most Capable)</option>
+                        {options_html}
                     </select>
                 </div>
+
 
                 <div class="border-t border-gray-100 dark:border-gray-700 pt-4">
                     <details class="group">

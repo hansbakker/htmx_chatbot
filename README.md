@@ -48,7 +48,8 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 ## Prerequisites
 
 *   Python 3.9+
-*   A [Gemini API Key](https://aistudio.google.com/).
+*   A [Gemini API Key](https://aistudio.google.com/) (if using Gemini).
+*   An [OpenAI API Key](https://platform.openai.com/) (if using OpenAI).
 *   A [Tavily API Key](https://tavily.com/) for web search.
 
 ## Installation
@@ -64,29 +65,40 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 
     ```bash
     python -m venv venv
-    source venv/bin/activate  # On Windows: venv\\Scripts\\activate
+    source venv/bin/activate  # On Windows: venv\Scripts\activate
     ```
 
 3.  **Install dependencies:**
     Create a `requirements.txt` file (or run directly):
 
     ```bash
-    pip install fastapi uvicorn jinja2 python-dotenv google-generativeai markdown pillow python-multipart tavily-python geopy matplotlib numpy pandas requests plotly kaleido
+    pip install fastapi uvicorn jinja2 python-dotenv google-generativeai openai markdown pillow python-multipart tavily-python geopy matplotlib numpy pandas requests plotly kaleido
     ```
 
 4.  **Configure Environment:**
     Create a `.env` file in the root directory:
     ```ini
+    # Required for Gemini Provider
     GEMINI_API_KEY=your_gemini_api_key_here
+    
+    # Required for OpenAI Provider
+    OPENAI_API_KEY=your_openai_api_key_here
+    
+    # Required for Web Search
     TAVILY_API_KEY=your_tavily_api_key_here
+    
+    # Optional: Weather Tools (XWeather)
     XWEATHER_MCP_ID=your_xweather_client_id_here
     XWEATHER_MCP_SECRET=your_xweather_client_secret_here
+    
+    # Optional: Wolfram Alpha
     WOLFRAM_ALPHA_APP_ID=your_wolfram_alpha_app_id_here
-    # Optional: Select Provider (defaults to gemini)
+    
+    # SELECT PROVIDER: 'gemini' or 'openai' (defaults to gemini)
     LLM_PROVIDER=gemini
     ```
     
-    **Note:** XWeather credentials are optional. If not provided, weather-related tools will not be available.
+    **Note:** You only need the API key for the provider you choose to use.
 
 ## Project Structure
 
@@ -96,6 +108,8 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 ├── providers/              # LLM Provider Abstraction Layer
 │   ├── base.py             # Abstract Base Class (LLMProvider)
 │   ├── gemini.py           # Google Gemini Implementation
+│   ├── openai.py           # OpenAI Implementation
+│   ├── utils.py            # Shared utilities (tool conversion)
 │   └── factory.py          # Provider Factory
 ├── .env                    # API Key configuration
 ├── requirements.txt        # Python dependencies
@@ -123,7 +137,8 @@ uvicorn main:app --reload
 *   **Archived Chats:** Go to Settings > Archived Chats to view, unarchive, or permanently delete hidden conversations.
 *   **New Chat:** Click the "New Chat" button in the sidebar (or header on mobile) to start a fresh conversation.
 *   **Configure Persona:** Click the "Settings" button in the top right to change the AI's system instruction.
-*   **Select Model:** In the settings panel, choose your preferred Gemini model (Flash, Pro, or Flash Thinking).
+*   **Select Model:** In the settings panel, choose your preferred model.
+    *   *Note: The available models update dynamically based on your configured `LLM_PROVIDER`. If using Gemini, you'll see Gemini models (Flash, Pro). If using OpenAI, you'll see GPT models (GPT-4o, o1-preview).*
 *   **Upload Files:** Click the paperclip icon to upload any file (images, PDFs, CSVs, text files, etc.).
 *   **Analyze Files:** After uploading, ask questions about the file content.
 *   **Clear File Context:** Click the "📎 Clear File Context" button to remove file references and restore tools/history.
@@ -141,7 +156,7 @@ uvicorn main:app --reload
     *   Client loads `index.html`.
     *   Server assigns a `session_id` cookie if missing.
     *   Server loads chat history from `chat.db`.
-    *   **Provider Factory:** Server initializes the configured LLM provider (default: Gemini) via `providers.factory.get_llm_provider`.
+    *   **Provider Factory:** Server initializes the configured LLM provider (Gemini or OpenAI) based on `LLM_PROVIDER` env var via `providers.factory.get_llm_provider`.
 
 2.  **User Submission:**
     *   HTMX sends a `POST /chat` (multipart/form-data for files).
