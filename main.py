@@ -2744,6 +2744,18 @@ async def get_system_instruction_ui(selected_model: str = Cookie(None), executio
                         <div id="tab-general" class="space-y-6">
                             <form hx-post="/settings/system_instruction" hx-swap="beforeend" hx-target="body">
                                 <div class="space-y-4">
+                                    <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
+                                        <div class="flex flex-col">
+                                            <span class="font-medium text-gray-900 dark:text-gray-300">Dark Mode</span>
+                                            <span class="text-xs text-gray-500 dark:text-gray-400">Toggle application theme</span>
+                                        </div>
+                                        <button type="button" onclick="toggleDarkMode()" class="relative inline-flex items-center cursor-pointer">
+                                            <!-- Custom toggle implementation using global dark mode class -->
+                                             <div id="theme-toggle-visual" class="w-11 h-6 bg-gray-200 dark:bg-blue-600 rounded-full relative transition-colors duration-200">
+                                                <div class="absolute top-1 left-1 bg-white w-4 h-4 rounded-full transition-transform duration-200 dark:translate-x-5 shadow-sm"></div>
+                                            </div>
+                                        </button>
+                                    </div>
                                     <div>
                                         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">AI Model</label>
                                         <div class="relative">
