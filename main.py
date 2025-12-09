@@ -40,7 +40,6 @@ import urllib.parse
 import json
 from geopy.geocoders import Nominatim
 from google.protobuf import struct_pb2
-# from e2b_code_interpreter import Sandbox # Moved to inside tools
 
 # Configure Matplotlib for headless environment
 import matplotlib
@@ -103,10 +102,9 @@ import io
 
 # --- 1. CONFIGURATION ---
 load_dotenv()
-# Remove global model instantiation to allow dynamic system instructions
 # Initialize Providers
 llm_provider = None
-# Default to Gemini for now, but this could come from config/env
+# if not provided in env, use gemini 
 active_provider_name = os.getenv("LLM_PROVIDER", "gemini")
 
 if active_provider_name:
