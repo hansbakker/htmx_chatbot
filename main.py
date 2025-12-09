@@ -1031,10 +1031,13 @@ def crawl_website(url: str, max_depth: int = 2, limit: int = 10, instructions: s
     except Exception as e:
         return f"Error crawling website: {str(e)}"
 
-def execute_calculation(code: str):
+def execute_calculation(code: str, file_path: str = None):
     """
     Executes Python code for calculations, logic, and text processing.
     Use this for math, data analysis, or string manipulation.
+    Args:
+        code (str): The Python code to execute.
+        file_path (str): Optional file path to upload to the E2B sandbox.
     
     IMPORTANT:
     - This tool does NOT support plotting or image generation. Use 'generate_chart' for that.
@@ -1051,6 +1054,17 @@ def execute_calculation(code: str):
             # Get timeout
             timeout = int(get_setting("e2b_timeout", "300"))
             with Sandbox.create() as sandbox:
+                if file_path:
+                    print(f"Uploading file to E2B: {file_path}")
+                    # Sanitize input to prevent directory traversal
+                    file_name = os.path.basename(file_path)
+                    file_path = os.path.join("static/uploads", file_name)
+                    print(f"Uploading file to E2B: {file_path}")
+                    # Upload the dataset to the sandbox
+                    dataset_path_in_sandbox = ""
+                    with open(file_path, "rb") as f:
+                        dataset_path_in_sandbox = sandbox.files.write(file_name, f) # Upload the file to the sandbox
+                        print(f"File uploaded to E2B: {dataset_path_in_sandbox}")
                 execution = sandbox.run_code(code, timeout=timeout)
                 
                 if execution.error:
@@ -1087,10 +1101,13 @@ def execute_calculation(code: str):
     except Exception as e:
         return f"Error executing code: {str(e)}"
 
-def generate_chart(code: str):
+def generate_chart(code: str, file_path: str = None):
     """
     Generates a chart or plot using Python and matplotlib.
     Use this tool WHENEVER the user asks for a visualization, graph, or chart.
+    args:
+        code (str): The Python code to execute.
+        file_path (str): Optional file path to upload to the E2B sandbox.
     
     IMPORTANT:
     - You MUST use `plt.savefig('plot.png')` (or any filename ending in .png) to save the plot.
@@ -1109,6 +1126,17 @@ def generate_chart(code: str):
             # Get timeout
             timeout = int(get_setting("e2b_timeout", "300"))
             with Sandbox.create() as sandbox:
+                if file_path:
+                    print(f"Uploading file to E2B: {file_path}")
+                    # Sanitize input to prevent directory traversal
+                    file_name = os.path.basename(file_path)
+                    file_path = os.path.join("static/uploads", file_name)
+                    print(f"Uploading file to E2B: {file_path}")
+                    # Upload the dataset to the sandbox
+                    dataset_path_in_sandbox = ""
+                    with open(file_path, "rb") as f:
+                        dataset_path_in_sandbox = sandbox.files.write(file_name, f) # Upload the file to the sandbox
+                        print(f"File uploaded to E2B: {dataset_path_in_sandbox}")
                 execution = sandbox.run_code(code, timeout=timeout)
                 if execution.error:
                     return f"Error in E2B Sandbox: {execution.error.name}: {execution.error.value}"
@@ -1225,11 +1253,14 @@ def generate_chart(code: str):
         return f"Error generating chart: {str(e)}"
 
 
-def generate_plotly_chart(code: str):
+def generate_plotly_chart(code: str, file_path: str = None):
     """
     Generates an advanced chart using Python and Plotly.
     Use this tool for complex, interactive, or 3D visualizations that matplotlib cannot handle well.
-    
+   
+    args:
+        code (str): The Python code to execute. 
+
     Examples of when to use this over generate_chart:
     - 3D plots and surfaces
     - Interactive charts (hover, zoom, pan)
@@ -1258,6 +1289,18 @@ def generate_plotly_chart(code: str):
             with Sandbox.create() as sandbox:
                 # Install kaleido for PNG export (version 0.2.1 is self-contained)
                 sandbox.commands.run("pip install kaleido==0.2.1")
+
+                if file_path:
+                    print(f"Uploading file to E2B: {file_path}")
+                    # Sanitize input to prevent directory traversal
+                    file_name = os.path.basename(file_path)
+                    file_path = os.path.join("static/uploads", file_name)
+                    print(f"Uploading file to E2B: {file_path}")
+                    # Upload the dataset to the sandbox
+                    dataset_path_in_sandbox = ""
+                    with open(file_path, "rb") as f:
+                        dataset_path_in_sandbox = sandbox.files.write(file_name, f) # Upload the file to the sandbox
+                        print(f"File uploaded to E2B: {dataset_path_in_sandbox}")
 
                 # 1. Run User Code
                 execution = sandbox.run_code(code, timeout=timeout)
@@ -2066,8 +2109,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 tools.append(read_source_code)
                 current_instruction += "\n\n- You have access to a 'read_source_code' tool. Use it for reading your own source code files. It returns TEXT output. It CANNOT generate images."
                 
-                tools.append(read_uploaded_file)
-                current_instruction += "\n\n- You have access to a 'read_uploaded_file' tool. Use it to see the text content of files that were previously uploaded to the uploads folder. It returns the raw text content."
+             #   tools.append(read_uploaded_file)
+             #   current_instruction += "\n\n- You have access to a 'read_uploaded_file' tool. Use it to see the text content of files that were previously uploaded to the uploads folder. It returns the raw text content."
 
                 tools.append(write_source_code)
                 current_instruction += "\n\n- You have access to a 'write_source_code' tool. Use it for writing (modified) source code to file. It returns TEXT output. It CANNOT generate images."
@@ -2076,13 +2119,13 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 current_instruction += "\n\n- You have access to an 'import_package' tool. Use it for checking if a package is installed (install=False) or installing and importing directly (install=True). It returns TEXT output. It CANNOT generate images. It can also just check if a package is installed"
                 
                 tools.append(execute_calculation)
-                current_instruction += "\n\n- You have access to an 'execute_calculation' tool. Use it for math, logic, text processing, or data analysis (numpy/pandas) or any arbitray python code executions. It returns TEXT output. It CANNOT generate images."
+                current_instruction += "\n\n- You have access to an 'execute_calculation' tool. Use it for math, logic, text processing, or data analysis (numpy/pandas) or any arbitray python code executions. You can provide a file path if the request is to use input from a file. It returns TEXT output. It CANNOT generate images."
 
                 tools.append(generate_chart)
-                current_instruction += "\n\n- You have access to a 'generate_chart' tool using matplotlib. Use this for standard charts (bar, line, pie, scatter, histograms). DO NOT provide Python code to the user - ALWAYS call the tool."
+                current_instruction += "\n\n- You have access to a 'generate_chart' tool using matplotlib. Use this for standard charts (bar, line, pie, scatter, histograms). You can provide a file path if the request is to use input from a file. DO NOT provide Python code to the user - ALWAYS call the tool."
 
                 tools.append(generate_plotly_chart)
-                current_instruction += "\n\n- You have access to a 'generate_plotly_chart' tool using Plotly. Use this for ADVANCED visualizations: 3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps. Use this when matplotlib's generate_chart cannot handle the request."
+                current_instruction += "\n\n- You have access to a 'generate_plotly_chart' tool using Plotly. Use this for ADVANCED visualizations: 3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps. you can provide a file path if the request is to use input from a file. DO NOT provide Python code to the user - ALWAYS call the tool. .Use this when matplotlib's generate_chart cannot handle the request."
 
                 tools.append(wolfram_alpha_query)
                 current_instruction += """\n\n- You have access to a 'wolfram_alpha_query' tool. Use it for complex math, scientific data, unit conversions, and factual queries.
@@ -2263,11 +2306,11 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             elif fn_name == "import_package":
                                 api_response = import_package(fn_args.get("package_name"))
                             elif fn_name == "execute_calculation":
-                                api_response = execute_calculation(fn_args.get("code"))
+                                api_response = execute_calculation(fn_args.get("code"), fn_args.get("file_path"))
                             elif fn_name == "generate_chart":
-                                api_response = generate_chart(fn_args.get("code"))
+                                api_response = generate_chart(fn_args.get("code"), fn_args.get("file_path"))
                             elif fn_name == "generate_plotly_chart":
-                                api_response = generate_plotly_chart(fn_args.get("code"))
+                                api_response = generate_plotly_chart(fn_args.get("code"), fn_args.get("file_path"))
                             elif fn_name == "generate_image":
                                 api_response = generate_image(fn_args.get("description"))
                             elif fn_name == "get_current_datetime":
