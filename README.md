@@ -44,6 +44,11 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
     *   Clicking a suggestion automatically submits it to the chat.
 *   **Robust Error Handling:** Gracefully handles API quota limits, token limits, and empty responses with automatic retries and user notifications.
 *   **Auto-Fix / Auto-Continue:** When the AI indicates it will retry or needs to continue (e.g., "let me try again", "please wait"), the system automatically triggers a follow-up request without requiring user input. Configurable retry phrases in `RETRY_PHRASES` constant.
+*   **Secure Code Sandbox (E2B):**
+    *   **Isolated Execution:** Run Python code (calculations, charts, Plotly) in a secure, cloud-based sandbox via [E2B](https://e2b.dev/).
+    *   **Configurable:** Toggle between Local and Sandbox execution in Settings.
+    *   **Timeout Control:** Adjust the sandbox execution timeout directly from the UI (default: 300s).
+    *   **Supported Tools:** Works seamlessly with `execute_calculation`, `generate_chart`, and `generate_plotly_chart`.
 
 ## Prerequisites
 
@@ -96,6 +101,9 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
     
     # SELECT PROVIDER: 'gemini' or 'openai' (defaults to gemini)
     LLM_PROVIDER=gemini
+
+    # Optional: E2B Sandbox (for secure code execution)
+    E2B_API_KEY=your_e2b_api_key_here
     ```
     
     **Note:** You only need the API key for the provider you choose to use.
@@ -181,9 +189,9 @@ The chatbot has access to the following tools:
 
 1.  **`search_web(query)`**: Searches the internet using Tavily API.
 2.  **`crawl_website(url, max_depth, limit, instructions)`**: Crawls a website starting from a URL to extract content from multiple pages. Useful for exploring site structure or gathering information from multiple pages.
-3.  **`execute_calculation(code)`**: Executes Python code (numpy/pandas) for math/logic.
-4.  **`generate_chart(code)`**: Creates standard visualizations using matplotlib (bar, line, pie, scatter, histograms).
-5.  **`generate_plotly_chart(code)`**: Creates advanced visualizations using Plotly (3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps).
+3.  **`execute_calculation(code)`**: Executes Python code (numpy/pandas) for math/logic. Supports local or E2B Sandbox execution.
+4.  **`generate_chart(code)`**: Creates standard visualizations using matplotlib. Supports local or E2B Sandbox execution.
+5.  **`generate_plotly_chart(code)`**: Creates advanced visualizations using Plotly (3D plots, interactive charts). Supports local or E2B Sandbox execution.
 6.  **`wolfram_alpha_query(query)`**: Queries Wolfram Alpha for complex math, scientific data, unit conversions, and facts.
 7.  **`generate_image(description)`**: Generates artistic images via Pollinations.ai.
 8.  **`get_current_datetime(timezone)`**: Returns current date/time (timezone-aware).

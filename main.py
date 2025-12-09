@@ -40,6 +40,7 @@ import urllib.parse
 import json
 from geopy.geocoders import Nominatim
 from google.protobuf import struct_pb2
+# from e2b_code_interpreter import Sandbox # Moved to inside tools
 
 # Configure Matplotlib for headless environment
 import matplotlib
@@ -56,6 +57,7 @@ import plotly.io as pio
 # Context variable to store client IP
 client_ip_ctx = contextvars.ContextVar("client_ip", default=None)
 session_id_ctx = contextvars.ContextVar("session_id", default=None)
+execution_mode_ctx = contextvars.ContextVar("execution_mode", default="local")
 
 # Retry phrases that trigger auto-continue (case-insensitive check)
 RETRY_PHRASES = [
@@ -230,6 +232,13 @@ def init_db():
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
         
         # Populate conversations from existing messages if needed
         cursor = conn.execute("SELECT DISTINCT session_id FROM messages WHERE session_id NOT IN (SELECT id FROM conversations)")
@@ -287,6 +296,25 @@ def delete_chat_files(session_id: str):
         conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM conversations WHERE id = ?", (session_id,))
         conn.commit()
+
+@retry_on_db_lock()
+def get_setting(key: str, default: str = None) -> str:
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            cursor = conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row[0] if row else default
+    except Exception as e:
+        print(f"Error reading setting {key}: {e}")
+        return default
+
+def save_setting(key: str, value: str):
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+            conn.commit() # Commit the change
+    except Exception as e:
+        print(f"Error saving setting {key}: {e}")
 
 @retry_on_db_lock()
 def get_history(session_id: str) -> List[Dict[str, str]]:
@@ -1015,6 +1043,34 @@ def execute_calculation(code: str):
     - The code must print the final result to stdout using `print()`.
     - You can import standard libraries (math, datetime, json, etc.) and numpy/pandas.
     """
+    # Check execution mode
+    execution_mode = execution_mode_ctx.get()
+    e2b_api_key = os.getenv("E2B_API_KEY")
+
+    if execution_mode == "e2b" and e2b_api_key:
+        from e2b_code_interpreter import Sandbox
+        try:
+            # Get timeout
+            timeout = int(get_setting("e2b_timeout", "300"))
+            with Sandbox.create() as sandbox:
+                execution = sandbox.run_code(code, timeout=timeout)
+                
+                if execution.error:
+                    return f"Error in E2B Sandbox: {execution.error.name}: {execution.error.value}\n{execution.error.traceback}"
+                
+                output = ""
+                if execution.logs.stdout:
+                    output += "\n".join(execution.logs.stdout)
+                if execution.logs.stderr:
+                    output += "\nStdErr: " + "\n".join(execution.logs.stderr)
+                
+                if not output:
+                    return "Code executed successfully in Sandbox (no output)."
+                return output.strip()
+        except Exception as e:
+            return f"Error executing code in E2B Sandbox: {str(e)}"
+
+    # Local Execution (Default)
     # Create a captured output stream
     output_capture = io.StringIO()
     
@@ -1044,6 +1100,63 @@ def generate_chart(code: str):
     - The code should clear the figure before plotting: `plt.clf()` or `plt.close()`.
     - The tool will return the path to the generated image.
     """
+    # Check execution mode
+    execution_mode = execution_mode_ctx.get()
+    e2b_api_key = os.getenv("E2B_API_KEY")
+
+    if execution_mode == "e2b" and e2b_api_key:
+        from e2b_code_interpreter import Sandbox
+        print("Generating chart in E2B Sandbox...")
+        try:
+            # Get timeout
+            timeout = int(get_setting("e2b_timeout", "300"))
+            with Sandbox.create() as sandbox:
+                execution = sandbox.run_code(code, timeout=timeout)
+                if execution.error:
+                    return f"Error in E2B Sandbox: {execution.error.name}: {execution.error.value}"
+
+                import base64
+                generated_file = None
+                output = ""
+                if execution.logs.stdout:
+                    output = "\n".join(execution.logs.stdout)
+
+                for result in execution.results:
+                    if result.png:
+                        # Decode and save
+                        img_data = base64.b64decode(result.png)
+                        new_filename = f"chart_{uuid.uuid4()}.png"
+                        dest_path = os.path.join(GENERATED_DIR, new_filename)
+                        with open(dest_path, "wb") as f:
+                            f.write(img_data)
+                        generated_file = f"/static/generated/{new_filename}"
+                        print(f"Retrieved chart from E2B: {dest_path}")
+                        break
+                
+                if generated_file:
+                     # Save to database if session_id is available
+                    session_id = session_id_ctx.get()
+                    if session_id:
+                        try:
+                            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                                conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, dest_path))
+                                print(f"Saved generated file record for session {session_id}: {dest_path}")
+                        except Exception as db_e:
+                            print(f"Error saving generated file to DB: {db_e}")
+
+                    return json.dumps({
+                        "status": "success",
+                        "output": output,
+                        "image_path": generated_file,
+                        "message": "Chart generated successfully in Sandbox."
+                    })
+                else:
+                     return f"Code executed in E2B but no chart was produced. Output: {output}"
+
+        except Exception as e:
+            return f"Error executing code in E2B Sandbox: {str(e)}"
+
+    # Local Execution (Default)
     # Ensure generated directory exists
     os.makedirs(GENERATED_DIR, exist_ok=True)
     
@@ -1133,6 +1246,138 @@ def generate_plotly_chart(code: str):
     - You do NOT need to call `fig.write_image` or `fig.write_html` yourself, but you can if you want specific filenames.
     - Use `import plotly.express as px` or `import plotly.graph_objects as go`.
     """
+    # Check execution mode
+    execution_mode = execution_mode_ctx.get()
+    e2b_api_key = os.getenv("E2B_API_KEY")
+
+    if execution_mode == "e2b" and e2b_api_key:
+        from e2b_code_interpreter import Sandbox
+        print("Generating Plotly chart in E2B Sandbox...")
+        try:
+            # Get timeout
+            timeout = int(get_setting("e2b_timeout", "300"))
+            
+            with Sandbox.create() as sandbox:
+                # Install kaleido for PNG export (version 0.2.1 is self-contained)
+                sandbox.commands.run("pip install kaleido==0.2.1")
+
+                # 1. Run User Code
+                execution = sandbox.run_code(code, timeout=timeout)
+                if execution.error:
+                    return f"Error in E2B Sandbox: {execution.error.name}: {execution.error.value}"
+
+                output = ""
+                if execution.logs.stdout:
+                    output = "\n".join(execution.logs.stdout)
+                
+                # 2. Introspection and Save
+                introspect_code = """
+import os
+import uuid
+import json
+
+generated_files = {}
+
+if 'fig' in locals():
+    # Generate unique names
+    base_name = str(uuid.uuid4())
+    html_name = f"plotly_{base_name}.html"
+    png_name = f"plotly_{base_name}.png"
+    
+    try:
+        fig.write_html(html_name)
+        generated_files['html'] = html_name
+    except Exception as e:
+        print(f"Error saving HTML: {e}")
+        
+    try:
+        # write_image requires kaleido or similar installed in env
+        # If it fails, we skipping PNG
+        fig.write_image(png_name)
+        generated_files['png'] = png_name
+    except Exception as e:
+        print(f"Error saving PNG: {e}")
+
+print("JSON_RESULT:" + json.dumps(generated_files))
+"""
+                save_exec = sandbox.run_code(introspect_code, timeout=60)
+                if save_exec.error:
+                     print(f"Introspection failed: {save_exec.error}")
+                
+                # Parse stdout for JSON result
+                combined_stdout = "\n".join(save_exec.logs.stdout)
+                import re
+                match = re.search(r"JSON_RESULT:(.*)", combined_stdout)
+                
+                generated_png = None
+                generated_html = None
+                
+                if match:
+                    json_str = match.group(1)
+                    try:
+                        files_map = json.loads(json_str)
+                        
+                        if 'html' in files_map:
+                            remote_path = files_map['html']
+                            local_filename = f"e2b_{remote_path}"
+                            dest_path = os.path.join(GENERATED_DIR, local_filename)
+                            
+                            # Download
+                            file_bytes = sandbox.files.read(remote_path, format="bytes")
+                            with open(dest_path, "wb") as f:
+                                f.write(file_bytes)
+                            
+                            generated_html = f"/static/generated/{local_filename}"
+                            
+                        if 'png' in files_map:
+                            remote_path = files_map['png']
+                            local_filename = f"e2b_{remote_path}"
+                            dest_path = os.path.join(GENERATED_DIR, local_filename)
+                            
+                            # Download
+                            file_bytes = sandbox.files.read(remote_path, format="bytes")
+                            with open(dest_path, "wb") as f:
+                                f.write(file_bytes)
+                                
+                            generated_png = f"/static/generated/{local_filename}"
+                            
+                    except Exception as e:
+                         print(f"Error parsing/downloading files: {e}")
+
+                # Save to database
+                if generated_png or generated_html:
+                    session_id = session_id_ctx.get()
+                    if session_id:
+                        try:
+                            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                                if generated_png:
+                                    conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(generated_png))))
+                                if generated_html:
+                                    conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(generated_html))))
+                        except Exception as db_e:
+                            print(f"Error saving generated file to DB: {db_e}")
+
+                # Construct response
+                response_data = {
+                    "status": "success",
+                    "output": output,
+                    "message": "Plotly chart generated successfully in E2B."
+                }
+                
+                if generated_png:
+                    response_data["image_path"] = generated_png
+                
+                if generated_html:
+                    response_data["html_path"] = generated_html
+                    link_msg = f'Interactive Plotly chart generated. <a href="{generated_html}" onclick="event.stopPropagation(); event.preventDefault(); window.open(this.href, \'_blank\'); return false;" class="text-blue-500 hover:underline">🔗 Open chart in new tab</a>'
+                    response_data["message"] =  link_msg
+
+                return json.dumps(response_data)
+
+        except Exception as e:
+            return f"Error executing Plotly code in E2B Sandbox: {str(e)}"
+
+    # Local Execution (Default)
     # Ensure generated directory exists
     os.makedirs(GENERATED_DIR, exist_ok=True)
     
@@ -1696,13 +1941,22 @@ async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile 
     return user_message_html + bot_placeholder_html
 
 @app.get("/stream")
-async def stream_response(request: Request, prompt: str, session_id: str = Cookie(None), stream_id: str = Query(...), image_path: Optional[str] = None, mime_type: Optional[str] = None, selected_model: str = Cookie("gemini-2.5-flash")):
+async def stream_response(request: Request, prompt: str, session_id: str = Cookie(None), stream_id: str = Query(...), image_path: Optional[str] = None, mime_type: Optional[str] = None, selected_model: str = Cookie(None), execution_mode: str = Cookie(None)):
     """
     The 'session_id' is automatically extracted from the browser cookie.
     """
     # Set client IP in context for tools to use
     if request.client:
         client_ip_ctx.set(request.client.host)
+    
+    # Fallback to DB settings
+    if selected_model is None:
+        selected_model = get_setting("selected_model", "gemini-2.5-flash")
+    if execution_mode is None:
+        execution_mode = get_setting("execution_mode", "local")
+
+    # Set execution mode
+    execution_mode_ctx.set(execution_mode)
     
     if session_id:
         session_id_ctx.set(session_id)
@@ -2422,7 +2676,15 @@ def clear_file_context(session_id: str = Cookie(None)):
 
 
 @app.get("/settings/system_instruction", response_class=HTMLResponse)
-async def get_system_instruction_ui(selected_model: str = Cookie("gemini-2.5-flash")):
+async def get_system_instruction_ui(selected_model: str = Cookie(None), execution_mode: str = Cookie(None)):
+    # Fallback to DB setting if cookie is missing
+    if selected_model is None:
+        selected_model = get_setting("selected_model", "gemini-2.5-flash")
+    if execution_mode is None:
+        execution_mode = get_setting("execution_mode", "local")
+    
+    e2b_timeout = get_setting("e2b_timeout", "300")
+        
     instruction = get_system_instruction()
     
     # Generate model options dynamically based on provider
@@ -2437,100 +2699,132 @@ async def get_system_instruction_ui(selected_model: str = Cookie("gemini-2.5-fla
             ("o3-mini", "o3 Mini (High Intelligence)")
         ]
     else:
+        # Gemini defaults
         options = [
-            ("gemini-2.0-flash-exp", "Gemini 2.0 Flash (Fastest)"),
-            ("gemini-2.0-flash-thinking-exp-01-21", "Gemini 2.0 Flash Thinking"),
-            ("gemini-1.5-pro", "Gemini 1.5 Pro (Balanced)"),
-            ("gemini-1.5-flash", "Gemini 1.5 Flash (Standard)")
+             ("gemini-2.0-flash-exp", "Gemini 2.0 Flash Exp (New)"),
+             ("gemini-exp-1206", "Gemini Exp 1206 (New)"),
+            ("gemini-1.5-pro", "Gemini 1.5 Pro (Best Quality)"),
+            ("gemini-1.5-flash", "Gemini 1.5 Flash (Fastest)"),
+            ("gemini-1.5-flash-8b", "Gemini 1.5 Flash-8B (Efficient)"),
+            ("gemini-2.5-flash", "Gemini 2.5 Flash (New)"),
+            ("gemini-2.0-flash-thinking-exp-1219", "Gemini 2.0 Flash Thinking (New)")
         ]
     
-    # Render options HTML
     options_html = ""
     for val, label in options:
-        # Determine if selected. Logic: match exact value OR (if mismatched provider, default to first option)
-        is_selected = False
-        if selected_model == val:
-            is_selected = True
-        elif val == options[0][0]:
-            # Default fallback logic
-            is_gemini_model = "gemini" in selected_model
-            is_gpt_model = "gpt" in selected_model or "o1" in selected_model or "o3" in selected_model
-            
-            if (is_gemini_model and is_openai) or (is_gpt_model and not is_openai):
-                 is_selected = True
+        selected = "selected" if val == selected_model else ""
+        options_html += f'<option value="{val}" {selected}>{label}</option>'
         
-        selected_attr = 'selected' if is_selected else ''
-        options_html += f'<option value="{val}" {selected_attr}>{label}</option>'
+    e2b_checked = "checked" if execution_mode == "e2b" else ""
+    e2b_disabled = "disabled" if not os.getenv("E2B_API_KEY") else ""
+    e2b_opacity = "opacity-50 cursor-not-allowed" if not os.getenv("E2B_API_KEY") else ""
+    e2b_title = "E2B API Key missing in .env" if not os.getenv("E2B_API_KEY") else ""
 
     return f"""
-    <div class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in" id="settings-modal">
-        <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden transform transition-all border border-gray-100 dark:border-gray-700">
-            <div class="p-6 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center bg-gray-50 dark:bg-gray-900/50">
-                <h3 class="text-lg font-semibold text-gray-800 dark:text-gray-100">System Settings</h3>
-                <button onclick="document.getElementById('settings-modal').remove()" class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+    <div id="settings-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-fade-in">
+        <div class="bg-white dark:bg-gray-800 w-full max-w-2xl rounded-2xl shadow-2xl overflow-hidden animate-scale-in flex flex-col max-h-[90vh]">
+            <div class="p-4 border-b border-gray-100 dark:border-gray-700 flex justify-between items-center bg-gray-50/50 dark:bg-gray-800/50">
+                <h3 class="font-bold text-gray-800 dark:text-gray-100 text-lg">Settings</h3>
+                <button onclick="document.getElementById('settings-modal').remove()" class="p-2 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-full transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-gray-500" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
                     </svg>
                 </button>
             </div>
-            <div class="p-6 space-y-4">
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">System Instruction (Persona)</label>
-                    <textarea name="instruction" 
-                              class="w-full h-32 p-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 dark:focus:border-blue-400 transition-all text-sm resize-none text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500"
-                              placeholder="e.g., You are a helpful assistant...">{instruction}</textarea>
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mt-2">This instruction will be applied to all new messages.</p>
-                </div>
-                
-                <div>
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Model Selection</label>
-                    <select name="model" 
-                            class="w-full p-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 dark:focus:border-blue-400 transition-all text-sm text-gray-800 dark:text-gray-200">
-                        {options_html}
-                    </select>
-                </div>
+            
+            <div class="flex-1 overflow-y-auto p-0">
+                <div class="flex h-full">
+                    <!-- Sidebar -->
+                    <div class="w-48 bg-gray-50 dark:bg-gray-900/50 border-r border-gray-100 dark:border-gray-700 p-2 space-y-1">
+                        <button onclick="showTab('general')" class="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300">General</button>
+                        <button hx-get="/archived-chats" hx-target="#archived-list" onclick="showTab('archived')" class="w-full text-left px-3 py-2 rounded-lg text-sm font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">Archived Chats</button>
+                    </div>
+                    
+                    <!-- Content -->
+                    <div class="flex-1 p-6">
+                        <!-- General Tab -->
+                        <div id="tab-general" class="space-y-6">
+                            <form hx-post="/settings/system_instruction" hx-swap="beforeend" hx-target="body">
+                                <div class="space-y-4">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">AI Model</label>
+                                        <div class="relative">
+                                            <select name="model" class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 appearance-none">
+                                                {options_html}
+                                            </select>
+                                            <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-gray-500">
+                                                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                                                </svg>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Code Execution</label>
+                                        <div class="flex flex-col gap-3 p-3 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
+                                            <div class="flex items-center gap-3" title="{e2b_title}">
+                                                <div class="flex items-center h-5">
+                                                    <input id="execution_mode" name="execution_mode" value="e2b" type="checkbox" {e2b_checked} {e2b_disabled} class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600">
+                                                </div>
+                                                <div class="flex flex-col">
+                                                    <label for="execution_mode" class="font-medium text-gray-900 dark:text-gray-300 {e2b_opacity}">Use E2B Sandbox</label>
+                                                    <span class="text-xs text-gray-500 dark:text-gray-400">Secure cloud execution environment</span>
+                                                </div>
+                                            </div>
+                                            
+                                            <div class="pt-2 border-t border-gray-200 dark:border-gray-700 {e2b_opacity}">
+                                                <label for="e2b_timeout" class="block text-xs font-medium text-gray-700 dark:text-gray-400 mb-1">Execution Timeout (seconds)</label>
+                                                <input type="number" id="e2b_timeout" name="e2b_timeout" value="{e2b_timeout}" min="10" max="3600" {e2b_disabled} class="w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500">
+                                            </div>
+                                        </div>
+                                    </div>
 
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">System Instruction</label>
+                                        <textarea name="instruction" rows="6" class="w-full bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-800 dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 resize-none placeholder-gray-400" placeholder="Define the AI's persona and behavior...">{instruction}</textarea>
+                                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">These instructions persist across sessions.</p>
+                                    </div>
 
-                <div class="border-t border-gray-100 dark:border-gray-700 pt-4">
-                    <details class="group">
-                        <summary class="list-none flex justify-between items-center cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 transition-colors">
-                            <span>Archived Chats</span>
-                            <span class="transition group-open:rotate-180">
-                                <svg fill="none" height="24" shape-rendering="geometricPrecision" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" viewBox="0 0 24 24" width="24"><path d="M6 9l6 6 6-6"></path></svg>
-                            </span>
-                        </summary>
-                        <div class="text-gray-500 dark:text-gray-400 mt-3 group-open:animate-fadeIn">
-                            <div id="archived-list" hx-get="/archived-chats" hx-trigger="load" class="max-h-40 overflow-y-auto space-y-1">
-                                <div class="flex justify-center p-2">
-                                    <svg class="animate-spin h-5 w-5 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <div class="flex justify-end pt-2">
+                                        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium transition-colors shadow-sm shadow-blue-500/20">
+                                            Save Settings
+                                        </button>
+                                    </div>
+                                </div>
+                            </form>
+                        </div>
+                        
+                        <!-- Archived Chats Tab -->
+                        <div id="tab-archived" class="hidden h-full flex flex-col">
+                             <h3 class="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Archived Conversations</h3>
+                             <div id="archived-list" class="flex-1 overflow-y-auto">
+                                <div class="flex items-center justify-center h-40 text-gray-400">
+                                    <svg class="animate-spin h-5 w-5 mr-3" viewBox="0 0 24 24">
                                         <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
                                         <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                                     </svg>
+                                    Loading...
                                 </div>
-                            </div>
+                             </div>
                         </div>
-                    </details>
+                    </div>
                 </div>
             </div>
-            <div class="p-6 border-t border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/50 flex justify-end gap-3">
-                <button onclick="document.getElementById('settings-modal').remove()" 
-                        class="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors">
-                    Cancel
-                </button>
-                <button hx-post="/settings/system_instruction" 
-                        hx-include="[name='instruction'], [name='model']"
-                        hx-target="#settings-modal"
-                        hx-swap="outerHTML"
-                        class="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-colors">
-                    Save Changes
-                </button>
-            </div>
+            
+            <script>
+                function showTab(tabName) {{
+                    document.getElementById('tab-general').classList.add('hidden');
+                    document.getElementById('tab-archived').classList.add('hidden');
+                    document.getElementById('tab-' + tabName).classList.remove('hidden');
+                }}
+            </script>
         </div>
     </div>
     """
 
 @app.post("/settings/system_instruction", response_class=HTMLResponse)
-async def post_system_instruction(instruction: str = Form(...), model: str = Form(...)):
+async def post_system_instruction(instruction: str = Form(...), model: str = Form(...), execution_mode: str = Form(None), e2b_timeout: int = Form(300)):
     save_system_instruction(instruction)
     response = Response(content="""
     <div id="settings-modal" class="fixed inset-0 z-50 flex items-end justify-center p-4 pointer-events-none">
@@ -2552,4 +2846,13 @@ async def post_system_instruction(instruction: str = Form(...), model: str = For
     </div>
     """)
     response.set_cookie(key="selected_model", value=model)
+    # Checkbox logic: if checked, value is "e2b". If unchecked, field is missing (None)
+    mode_value = "e2b" if execution_mode == "e2b" else "local"
+    response.set_cookie(key="execution_mode", value=mode_value)
+    
+    # Save to DB for persistence
+    save_setting("selected_model", model)
+    save_setting("execution_mode", mode_value)
+    save_setting("e2b_timeout", str(e2b_timeout))
+    
     return response
