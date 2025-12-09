@@ -1587,7 +1587,7 @@ def generate_image(description: str):
     """
     Generates an artistic or creative image based on the description using AI.
     Use this tool for artistic requests like "draw a cat", "create a sunset landscape", etc.
-    DO NOT use this for data visualizations, charts, or graphs - use generate_chart instead.
+    DO NOT use this for data visualizations, maps, charts, or graphs - use generate_chart or generate_plotly_chart instead.
     
     Args:
         description (str): A detailed description of the image to generate.
@@ -2699,13 +2699,12 @@ async def get_system_instruction_ui(selected_model: str = Cookie(None), executio
     else:
         # Gemini defaults
         options = [
-             ("gemini-2.0-flash-exp", "Gemini 2.0 Flash Exp (New)"),
-             ("gemini-exp-1206", "Gemini Exp 1206 (New)"),
-            ("gemini-1.5-pro", "Gemini 1.5 Pro (Best Quality)"),
-            ("gemini-1.5-flash", "Gemini 1.5 Flash (Fastest)"),
-            ("gemini-1.5-flash-8b", "Gemini 1.5 Flash-8B (Efficient)"),
+            ("gemini-3-pro-preview", "Gemini 3 Pro Preview (New)"),
+            ("gemini-2.5-pro", "Gemini 2.5 Pro (New)"),
             ("gemini-2.5-flash", "Gemini 2.5 Flash (New)"),
-            ("gemini-2.0-flash-thinking-exp-1219", "Gemini 2.0 Flash Thinking (New)")
+            ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite (New)"),
+            ("gemini-2.0-flash", "Gemini 2.0 Flash"),
+            ("gemini-2.0-flash-lite", "Gemini 2.0 Flash Lite"),
         ]
     
     options_html = ""
