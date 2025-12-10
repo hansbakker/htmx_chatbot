@@ -1035,14 +1035,17 @@ def execute_calculation(code: str, file_path: str = None):
     """
     Executes Python code for calculations, logic, and text processing.
     Use this for math, data analysis, or string manipulation.
+    Also takes a file path to upload to the execution environment.
     Args:
         code (str): The Python code to execute.
-        file_path (str): Optional file path to upload to the E2B sandbox.
-    
+        file_path (str): Optional file path to upload to the execution environment.
+
     IMPORTANT:
     - This tool does NOT support plotting or image generation. Use 'generate_chart' for that.
     - The code must print the final result to stdout using `print()`.
     - You can import standard libraries (math, datetime, json, etc.) and numpy/pandas.
+    - any files uploaded to the execution environment will be deleted after the code is executed.
+    - any files uploaded to the execution environment will be in the root folder of the execution environment.
     """
     # Check execution mode
     execution_mode = execution_mode_ctx.get()
@@ -1055,7 +1058,6 @@ def execute_calculation(code: str, file_path: str = None):
             timeout = int(get_setting("e2b_timeout", "300"))
             with Sandbox.create() as sandbox:
                 if file_path:
-                    print(f"Uploading file to E2B: {file_path}")
                     # Sanitize input to prevent directory traversal
                     file_name = os.path.basename(file_path)
                     file_path = os.path.join("static/uploads", file_name)
@@ -1114,6 +1116,8 @@ def generate_chart(code: str, file_path: str = None):
     - Do NOT use `plt.show()`.
     - The code should clear the figure before plotting: `plt.clf()` or `plt.close()`.
     - The tool will return the path to the generated image.
+    - any files uploaded to the execution environment will be deleted after the code is executed.
+    - any files uploaded to the execution environment will be in the root folder of the execution environment.
     """
     # Check execution mode
     execution_mode = execution_mode_ctx.get()
@@ -1127,7 +1131,6 @@ def generate_chart(code: str, file_path: str = None):
             timeout = int(get_setting("e2b_timeout", "300"))
             with Sandbox.create() as sandbox:
                 if file_path:
-                    print(f"Uploading file to E2B: {file_path}")
                     # Sanitize input to prevent directory traversal
                     file_name = os.path.basename(file_path)
                     file_path = os.path.join("static/uploads", file_name)
@@ -1257,9 +1260,12 @@ def generate_plotly_chart(code: str, file_path: str = None):
     """
     Generates an advanced chart using Python and Plotly.
     Use this tool for complex, interactive, or 3D visualizations that matplotlib cannot handle well.
-   
+    any files uploaded to the execution environment will be deleted after the code is executed.
+    any files uploaded to the execution environment will be in the root folder of the execution environment.    
+
     args:
         code (str): The Python code to execute. 
+        file_path (str): Optional file path to upload to the execution environment.
 
     Examples of when to use this over generate_chart:
     - 3D plots and surfaces
@@ -1291,7 +1297,6 @@ def generate_plotly_chart(code: str, file_path: str = None):
                 sandbox.commands.run("pip install kaleido==0.2.1")
 
                 if file_path:
-                    print(f"Uploading file to E2B: {file_path}")
                     # Sanitize input to prevent directory traversal
                     file_name = os.path.basename(file_path)
                     file_path = os.path.join("static/uploads", file_name)
@@ -2027,55 +2032,58 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 # image_path comes as "/static/uploads/..."
                 local_path = image_path.lstrip("/")
                 
-                try:
-                    # Upload to Provider
-                    print(f"Uploading file to Provider: {local_path} ({mime_type})")
-                    if llm_provider:
-                        uploaded_file = await llm_provider.upload_file(local_path, mime_type=mime_type, wait_for_active=True)
-                    else:
-                        raise ValueError("LLM Provider not initialized")
-                    
-                    # Wait for processing is now handled by provider
-                    # while uploaded_file.state.name == "PROCESSING": ...
+                # Determine if we should upload to Provider (Images/Video) or just provide path (Data)
+                is_media = mime_type and (mime_type.startswith("image/") or mime_type.startswith("video/"))
+                
+                if is_media:
+                    try:
+                        # Upload to Provider
+                        print(f"Uploading file to Provider: {local_path} ({mime_type})")
+                        if llm_provider:
+                            uploaded_file = await llm_provider.upload_file(local_path, mime_type=mime_type, wait_for_active=True)
+                        else:
+                            raise ValueError("LLM Provider not initialized")
                         
-                    # Handle different return types (Gemini vs OpenAI)
-                    if hasattr(uploaded_file, "state") and uploaded_file.state.name == "FAILED":
-                         yield format_sse("<div><strong>Error:</strong> File processing failed.</div>")
-                         return
-                    elif isinstance(uploaded_file, dict) and "error" in uploaded_file:
-                         yield format_sse(f"<div><strong>Error:</strong> {uploaded_file['error']}</div>")
-                         return
+                        # Handle different return types (Gemini vs OpenAI)
+                        if hasattr(uploaded_file, "state") and uploaded_file.state.name == "FAILED":
+                             yield format_sse("<div><strong>Error:</strong> File processing failed.</div>")
+                             return
+                        elif isinstance(uploaded_file, dict) and "error" in uploaded_file:
+                             yield format_sse(f"<div><strong>Error:</strong> {uploaded_file['error']}</div>")
+                             return
 
-                    current_parts.append(uploaded_file)
-                    
-                    # Log URI if available
-                    uri_log = getattr(uploaded_file, "uri", "local_file_only")
-                    print(f"File uploaded successfully: {uri_log}")
-                    
-                    # Update the message in DB with the Gemini URI for future context
-                    # We need to find the message ID. Since we don't have it easily (it was just inserted),
-                    # we can update by session_id and image_path (assuming unique enough for this flow)
-                    # or better: update the LAST message for this session that has this image_path
-                    if session_id:
-                        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
-                            conn.execute(
-                                """
-                                UPDATE messages 
-                                SET gemini_uri = ? 
-                                WHERE id = (
-                                    SELECT id FROM messages 
-                                    WHERE session_id = ? AND image_path = ? 
-                                    ORDER BY id DESC LIMIT 1
+                        current_parts.append(uploaded_file)
+                        
+                        # Log URI if available
+                        uri_log = getattr(uploaded_file, "uri", "local_file_only")
+                        print(f"File uploaded successfully: {uri_log}")
+                        
+                        # Update the message in DB with the Gemini URI
+                        if session_id:
+                            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                                conn.execute(
+                                    """
+                                    UPDATE messages 
+                                    SET gemini_uri = ? 
+                                    WHERE id = (
+                                        SELECT id FROM messages 
+                                        WHERE session_id = ? AND image_path = ? 
+                                        ORDER BY id DESC LIMIT 1
+                                    )
+                                    """,
+                                    (getattr(uploaded_file, "uri", None), session_id, image_path)
                                 )
-                                """,
-                                (getattr(uploaded_file, "uri", None), session_id, image_path)
-                            )
-                    
-                except Exception as e:
-                    print(f"Error uploading file: {e}")
-                    yield format_sse(f"<div><strong>Error uploading file:</strong> {str(e)}</div>")
-                    # Continue without file? Or return? Let's return to be safe.
-                    return
+                        
+                    except Exception as e:
+                        print(f"Error uploading file: {e}")
+                        yield format_sse(f"<div><strong>Error uploading file:</strong> {str(e)}</div>")
+                        return
+                else:
+                    # Data File handling
+                    print(f"File is data (not media). Skipping Provider upload: {local_path}")
+                    # Provide system notification about the file
+                    file_name = os.path.basename(local_path)
+                    current_parts.append(f"[System Notification: User uploaded file '{file_name}' to '{local_path}'. You can use tools like 'read_uploaded_file' to read it, or pass the path to 'execute_calculation' or 'generate_chart'.]")
 
             messages_payload.append({
                 "role": "user",
@@ -2088,76 +2096,124 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             current_instruction = get_system_instruction() # Start with base instruction
             has_file_in_context = uploaded_file is not None # Check if file was uploaded in this turn
             
-            # Check history for files too
+            # Check logic:
+            # If we represent a "Vision" turn (uploading image/video), we disable tools and keep history (Context).
+            # If we represent a "Text/Tool" turn (uploading data or just text), we MUST ENABLE tools.
+            # However, Gemini throws 400 if Tools + Images exist in history.
+            # So, for Tool turns, we sanitize history by removing media parts.
+            
             if not has_file_in_context:
+                # We are in Tool Mode (no current media upload)
+                sanitized_msgs = []
+                history_filtered = False
+                
                 for msg in messages_payload:
+                    clean_parts = []
                     for part in msg.get('parts', []):
+                        is_media = False
                         if hasattr(part, 'file_data') and part.file_data:
-                            has_file_in_context = True
-                            break
-                    if has_file_in_context:
-                        break
+                            mime = getattr(part.file_data, 'mime_type', '')
+                            if mime.startswith('image/') or mime.startswith('video/'):
+                                is_media = True
+                        
+                        if not is_media:
+                            clean_parts.append(part)
+                        else:
+                            history_filtered = True
+                    
+                    if clean_parts:
+                        sanitized_msgs.append({"role": msg["role"], "parts": clean_parts})
+                
+                if history_filtered:
+                    messages_payload = sanitized_msgs
 
             if not has_file_in_context:
                 if tavily_client:
                     tools.append(search_web)
-                    current_instruction += "\n\n- You have access to a 'search_web' tool. You must use it whenever the user asks for current information, news, or facts you don't know. Do NOT invent new tools. Only use 'search_web' for searching."
+                    current_instruction += """\n\n- You have access to a 'search_web' tool. You must use it whenever the user asks for current information, news, or facts you don't know. 
+                    Do NOT invent new tools. Only use 'search_web' for searching."""
                     
                     tools.append(crawl_website)
-                    current_instruction += "\n\n- You have access to a 'crawl_website' tool. Use it when you need to gather content from multiple pages of a specific website, explore a site's structure, or extract information from specific URLs. Parameters: url (required), max_depth (default 2), limit (default 10), instructions (optional filter)."
+                    current_instruction += """\n\n- You have access to a 'crawl_website' tool. 
+                    Use it when you need to gather content from multiple pages of a specific website, explore a site's structure, or extract information from specific URLs. 
+                    Parameters: url (required), max_depth (default 2), limit (default 10), instructions (optional filter)."""
                 
                 tools.append(read_source_code)
-                current_instruction += "\n\n- You have access to a 'read_source_code' tool. Use it for reading your own source code files. It returns TEXT output. It CANNOT generate images."
+                current_instruction += """\n\n- You have access to a 'read_source_code' tool. 
+                Use it for reading your own source code files. It returns TEXT output. It CANNOT generate images."""
                 
-             #   tools.append(read_uploaded_file)
-             #   current_instruction += "\n\n- You have access to a 'read_uploaded_file' tool. Use it to see the text content of files that were previously uploaded to the uploads folder. It returns the raw text content."
+                tools.append(read_uploaded_file)
+                current_instruction += """\n\n- You have access to a 'read_uploaded_file' tool. 
+                Use it to see the text content of files that were previously uploaded to the uploads folder. It returns the raw text content."""
 
                 tools.append(write_source_code)
-                current_instruction += "\n\n- You have access to a 'write_source_code' tool. Use it for writing (modified) source code to file. It returns TEXT output. It CANNOT generate images."
+                current_instruction += """\n\n- You have access to a 'write_source_code' tool. Use it for writing (modified) source code to file. 
+                It returns TEXT output. It CANNOT generate images."""
 
                 tools.append(import_package)
-                current_instruction += "\n\n- You have access to an 'import_package' tool. Use it for checking if a package is installed (install=False) or installing and importing directly (install=True). It returns TEXT output. It CANNOT generate images. It can also just check if a package is installed"
+                current_instruction += """\n\n- You have access to an 'import_package' tool. 
+                Use it for checking if a package is installed (install=False) or installing and importing directly (install=True). It returns TEXT output. 
+                It CANNOT generate images. It can also just check if a package is installed."""
                 
                 tools.append(execute_calculation)
-                current_instruction += "\n\n- You have access to an 'execute_calculation' tool. Use it for math, logic, text processing, or data analysis (numpy/pandas) or any arbitray python code executions. You can provide a file path if the request is to use input from a file. It returns TEXT output. It CANNOT generate images."
+                current_instruction += """\n\n- You have access to an 'execute_calculation' tool. 
+                Use it for math, logic, text processing, or data analysis (numpy/pandas) or any arbitray python code executions. 
+                If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
+                It returns TEXT output. It CANNOT generate images. DO NOT provide Python code to the user - ALWAYS call the tool."""
 
                 tools.append(generate_chart)
-                current_instruction += "\n\n- You have access to a 'generate_chart' tool using matplotlib. Use this for standard charts (bar, line, pie, scatter, histograms). You can provide a file path if the request is to use input from a file. DO NOT provide Python code to the user - ALWAYS call the tool."
-
+                current_instruction += """\n\n- You have access to a 'generate_chart' tool using matplotlib. 
+                Use this for standard charts (bar, line, pie, scatter, histograms). 
+                If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
+                DO NOT provide Python code to the user - ALWAYS call the tool."""
+                
                 tools.append(generate_plotly_chart)
-                current_instruction += "\n\n- You have access to a 'generate_plotly_chart' tool using Plotly. Use this for ADVANCED visualizations: 3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps. you can provide a file path if the request is to use input from a file. DO NOT provide Python code to the user - ALWAYS call the tool. .Use this when matplotlib's generate_chart cannot handle the request."
+                current_instruction += """\n\n- You have access to a 'generate_plotly_chart' tool using Plotly. 
+                Use this for ADVANCED visualizations: 3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps. 
+                if a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
+                DO NOT provide Python code to the user - ALWAYS call the tool. Use this when matplotlib's generate_chart cannot handle the request."""
 
                 tools.append(wolfram_alpha_query)
-                current_instruction += """\n\n- You have access to a 'wolfram_alpha_query' tool. Use it for complex math, scientific data, unit conversions, and factual queries.
-                    GUIDELINES:
-                        - Convert inputs to simplified keyword queries (e.g. "France population" instead of "how many people live in France").
-                        - Send queries in English only.
-                        - Use proper Markdown for math formulas: '$$...$$' for block, '\\(...\\)' for inline.
-                        - Use named physical constants (e.g., 'speed of light') without numerical substitution.
-                        - Include a space between compound units (e.g., "Ω m").
-                        - If data for multiple properties is needed, make separate calls for each property.
-                        - If the result is not relevant, try re-sending with 'Assumption' parameters if suggested by Wolfram."""
+                current_instruction += """\n\n- You have access to a 'wolfram_alpha_query' tool. 
+                Use it for complex math, scientific data, unit conversions, and factual queries that might not be in your knowledge base.
+                GUIDELINES:
+                Convert inputs to simplified keyword queries (e.g. "France population" instead of "how many people live in France").
+                Send queries in English only.
+                Use proper Markdown for math formulas: '$$...$$' for block, '\\(...\\)' for inline.
+                Use named physical constants (e.g., 'speed of light') without numerical substitution.
+                Include a space between compound units (e.g., "m Ω" instead of "mΩ").
+                If data for multiple properties is needed, make separate calls for each property.
+                If the result is not relevant, try re-sending with 'Assumption' parameters if suggested by Wolfram."""
 
                 tools.append(generate_image)
-                current_instruction += "\n\n- You have access to a 'generate_image' tool. Use it for artistic or creative image requests like 'draw a cat', 'create a sunset landscape', etc. DO NOT use this for data visualizations - use generate_chart instead."
+                current_instruction += """\n\n- You have access to a 'generate_image' tool.
+                 Use it for artistic or creative image requests like 'draw a cat', 'create a sunset landscape', etc. 
+                 DO NOT use this for data visualizations - use generate_chart instead."""
 
                 tools.append(get_current_datetime)
-                current_instruction += "\n\n- You have access to a 'get_current_datetime' tool. Use it when asked about the current time or date. It automatically detects the user's timezone from their IP. You can also pass a 'timezone' argument (e.g., 'Asia/Tokyo') if the user explicitly requests a specific timezone."
+                current_instruction +="""\n\n- You have access to a 'get_current_datetime' tool. 
+                Use it when asked about the current time or date. It automatically detects the user's timezone from their IP. 
+                You can also pass a 'timezone' argument (e.g., 'Asia/Tokyo') if the user explicitly requests a specific timezone."""
 
                 tools.append(get_user_timezone)
-                current_instruction += "\n\n- You have access to a 'get_user_timezone' tool. Use it when the user asks 'What is my timezone?' or wants to know the timezone detected from their IP."
+                current_instruction += """\n\n- You have access to a 'get_user_timezone' tool. 
+                Use it when the user asks 'What is my timezone?' or wants to know the timezone detected from their IP."""
 
                 tools.append(get_coordinates)
-                current_instruction += "\n\n- You have access to a 'get_coordinates' tool. Use it to find the latitude and longitude of locations."
+                current_instruction += """\n\n- You have access to a 'get_coordinates' tool. 
+                Use it to find the latitude and longitude of locations."""
 
                 tools.append(get_weather)
-                current_instruction += "\n\n- You have access to a 'get_weather' tool. Use it when the user asks about current weather, temperature, or conditions for any location."
+                current_instruction += """\n\n- You have access to a 'get_weather' tool. 
+                Use it when the user asks about current weather, temperature, or conditions for any location."""
 
                 tools.append(get_forecast_weather)
-                current_instruction += "\n\n- You have access to a 'get_forecast_weather' tool. Use it for multi-day weather forecasts, planning, event scheduling, or when the user asks about future weather."
+                current_instruction += """\n\n- You have access to a 'get_forecast_weather' tool. 
+                Use it for multi-day weather forecasts, planning, event scheduling, or when the user asks about future weather."""
 
                 tools.append(get_precipitation_timing)
-                current_instruction += "\n\n- You have access to a 'get_precipitation_timing' tool. Use it when the user asks 'when will it rain?', 'when will it stop raining?', or needs precipitation timing information."
+                current_instruction += """\n\n- You have access to a 'get_precipitation_timing' tool. 
+                Use it when the user asks 'when will it rain?', 'when will it stop raining?', or needs precipitation timing information."""
             else:
                 # When files are present, clear history to avoid API compatibility issues
                 # Keep only the current message (last one in payload)
@@ -2168,21 +2224,22 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 
                 current_instruction += "\n\nNote: Tool calling is disabled because you are analyzing an uploaded file. Focus on the file content."
             
-            current_instruction += """\n\n- if you have actionable follow-up suggestions, append them to the very end of your response as a JSON object with the key 'suggestions', like this: {"suggestions": ["Action 1", "Action 2"]}. Do not wrap this in markdown code blocks. Make sure it is the last thing in your response."""
+            current_instruction += """\n\n- if you have actionable follow-up suggestions, 
+            append them to the very end of your response as a JSON object with the key 'suggestions', 
+            like this: {"suggestions": ["Action 1", "Action 2"]}. Do not wrap this in markdown code blocks. 
+            Make sure it is the last thing in your response."""
+
             current_instruction += """\n\n- when providing a URL make sure it's clickable, with target being a new tab"""
             current_instruction += """\n\n- when using search_web tool, remember the urls that were used"""
-            
-
-            # model = genai.GenerativeModel(...) - REMOVED
             
             # We need to handle potential function calls in a loop
             # Since we are streaming, this is a bit tricky with the official SDK's generate_content(stream=True)
             # automatic function calling isn't fully supported in stream mode for single-turn logic easily without chat session.
-            # But we can do it manually.
+            # But we can do it 'manually' by checking for function calls in the response and calling them if needed.
             
             # Auto-continue loop - will retry if model says "please wait" etc.
             auto_continue_count = 0
-            max_auto_continues = 3
+            max_auto_continues = 5
             should_auto_continue = True
             
             while should_auto_continue and auto_continue_count <= max_auto_continues:
