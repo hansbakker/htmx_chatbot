@@ -86,7 +86,12 @@ RETRY_PHRASES = [
     "stand by",
     "might take a few moments",
     "here we go",
-    "let's"
+    "let's",
+    "I'll now",
+    "I will now",
+    "I'll calculate",
+    "I will calculate",
+    "Here is"
 ]
 
 # Custom Providers
