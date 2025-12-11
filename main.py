@@ -901,7 +901,6 @@ def write_source_code(session_id: str, file_path: str, code: str):
     Writes the file containing the source code to the specified path.
     Use this tool when you need to write the source code of a file.
     Args:
-        session_id (str): The ID of the session.
         file_path (str): The path to the file to write.This may NOT be "main.py", if not an error message is returned.
         code (str): String containing the modified source code to write to the file.
 
@@ -2199,6 +2198,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
 
                 tools.append(write_source_code)
                 current_instruction += """\n\n- You have access to a 'write_source_code' tool. Use it for writing (modified) source code to file. 
+                Leave session_id empty in the function call, this is automatically taken from the environment variable.
                 It returns TEXT output. It CANNOT generate images."""
 
                 tools.append(import_package)
