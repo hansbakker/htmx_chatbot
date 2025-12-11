@@ -694,6 +694,16 @@ async def archive_chat(session_id: str, request: Request):
             conn.commit()
         
         current_session_id = request.cookies.get("session_id")
+
+        # If the archived chat is the current one, we need to reset the UI
+        if session_id == current_session_id:
+            # Generate new session like /new-chat
+            new_session_id = str(uuid.uuid4())
+            response = Response()
+            response.set_cookie(key="session_id", value=new_session_id, max_age=31536000)
+            response.headers["HX-Redirect"] = "/" # Full page reload to clean state
+            return response
+
         sidebar_html = render_sidebar_html(current_session_id)
         archived_html = render_archived_list_html()
         
@@ -730,6 +740,17 @@ async def delete_chat_route(session_id: str, request: Request):
         delete_chat_files(session_id)
         
         current_session_id = request.cookies.get("session_id")
+        
+        # If the deleted chat is the current one, we need to reset the UI
+        if session_id == current_session_id:
+            # Generate new session like /new-chat
+            new_session_id = str(uuid.uuid4())
+            response = Response()
+            response.set_cookie(key="session_id", value=new_session_id, max_age=31536000)
+            response.headers["HX-Redirect"] = "/" # Full page reload to clean state
+            return response
+            
+        # Otherwise just update components
         sidebar_html = render_sidebar_html(current_session_id)
         archived_html = render_archived_list_html()
         
