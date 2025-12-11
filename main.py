@@ -213,19 +213,6 @@ def init_db():
                 FOREIGN KEY(session_id) REFERENCES conversations(id)
             )
         """)
-        # Migration for existing table
-        try:
-            conn.execute("ALTER TABLE messages ADD COLUMN image_path TEXT")
-        except sqlite3.OperationalError:
-            pass # Column likely exists
-        try:
-            conn.execute("ALTER TABLE messages ADD COLUMN mime_type TEXT")
-        except sqlite3.OperationalError:
-            pass # Column likely exists
-        try:
-            conn.execute("ALTER TABLE messages ADD COLUMN gemini_uri TEXT")
-        except sqlite3.OperationalError:
-            pass # Column likely exists
         
         conn.execute("""
             CREATE TABLE IF NOT EXISTS generated_files (
@@ -235,7 +222,22 @@ def init_db():
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
-
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS generated_code (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS uploaded_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                file_path TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -281,16 +283,24 @@ def delete_chat_files(session_id: str):
         generated_files = [row[0] for row in cursor.fetchall()]
         
         # Get uploaded files
-        cursor = conn.execute("SELECT image_path FROM messages WHERE session_id = ? AND image_path IS NOT NULL", (session_id,))
+        cursor= conn.execute("SELECT file_path FROM uploaded_files WHERE session_id = ?", (session_id,))
         uploaded_files = [row[0] for row in cursor.fetchall()]
+
+        # get generated code files
+        cursor = conn.execute("SELECT file_path FROM generated_code WHERE session_id = ?", (session_id,))
+        generated_code_files = [row[0] for row in cursor.fetchall()]
         
+
         # Delete physical files
-        all_files = generated_files + uploaded_files
+        all_files = generated_files + uploaded_files + generated_code_files
         for file_path in all_files:
+            print(file_path)
             try:
                 if os.path.exists(file_path):
                     os.remove(file_path)
                     print(f"Deleted file: {file_path}")
+                else:
+                    print(f"File does not exist: {file_path}")
             except Exception as e:
                 print(f"Error deleting file {file_path}: {e}")
         
@@ -298,6 +308,8 @@ def delete_chat_files(session_id: str):
         conn.execute("DELETE FROM generated_files WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
         conn.execute("DELETE FROM conversations WHERE id = ?", (session_id,))
+        conn.execute("DELETE FROM uploaded_files WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM generated_code WHERE session_id = ?", (session_id,))
         conn.commit()
 
 @retry_on_db_lock()
@@ -422,7 +434,8 @@ def save_message(session_id: str, role: str, content: str, image_path: Optional[
              if current_title == "New Chat":
                  new_title = content[:30] + "..." if len(content) > 30 else content
                  conn.execute("UPDATE conversations SET title = ? WHERE id = ?", (new_title, session_id))
-
+        if image_path:
+            conn.execute("INSERT INTO uploaded_files (session_id, file_path) VALUES (?, ?)", (session_id, image_path[1:]))
         conn.execute(
             "INSERT INTO messages (session_id, role, content, image_path, mime_type, gemini_uri) VALUES (?, ?, ?, ?, ?, ?)",
             (session_id, role, content, image_path, mime_type, gemini_uri)
@@ -883,11 +896,12 @@ def import_package(package_name,install=True):
             print(f"Failed to install {package_name}: {e}")
             return {"response": "Failed to install {package_name}: {e}"}
 
-def write_source_code(file_path: str, code: str):
+def write_source_code(session_id: str, file_path: str, code: str):
     """
     Writes the file containing the source code to the specified path.
     Use this tool when you need to write the source code of a file.
     Args:
+        session_id (str): The ID of the session.
         file_path (str): The path to the file to write.This may NOT be "main.py", if not an error message is returned.
         code (str): String containing the modified source code to write to the file.
 
@@ -896,10 +910,15 @@ def write_source_code(file_path: str, code: str):
     """
     try:
         if file_path!="main.py":
-            file_path = './static/generated_code/' + file_path
+            file_path = 'static/generated_code/' + file_path
             with open(file_path, 'w') as f:
                 print(f"Writing file {file_path}")
                 f.write(code)
+                try:
+                    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                        conn.execute("INSERT INTO generated_code (session_id, file_path) VALUES (?, ?)", (session_id, file_path))
+                except Exception as e:
+                    print(f"Failed to insert file path into database: {e}")
                 return f"Successfully wrote file {file_path}"
         else:
             return f"Target file name not allowed: {file_path}"    
@@ -918,7 +937,7 @@ def read_source_code(file_path: str):
     """
     try:
         if file_path!="main.py":
-            file_path = './static/generated_code/' + file_path
+            file_path = 'static/generated_code/' + file_path
             with open(file_path, 'r') as f:
                 print(f"Reading file {file_path}")
                 code = f.read()
@@ -1036,7 +1055,7 @@ def crawl_website(url: str, max_depth: int = 2, limit: int = 10, instructions: s
     except Exception as e:
         return f"Error crawling website: {str(e)}"
 
-def execute_calculation(code: str, file_path: str = None):
+def execute_calculation(code: str, file_path: str = None): 
     """
     Executes Python code for calculations, logic, and text processing.
     Use this for math, data analysis, or string manipulation.
@@ -1051,6 +1070,9 @@ def execute_calculation(code: str, file_path: str = None):
     - You can import standard libraries (math, datetime, json, etc.) and numpy/pandas.
     - any files uploaded to the execution environment will be deleted after the code is executed.
     - any files uploaded to the execution environment will be in the root folder of the execution environment.
+
+    Returns:
+        str: the result of the calculation.
     """
     # Check execution mode
     execution_mode = execution_mode_ctx.get()
@@ -1123,6 +1145,9 @@ def generate_chart(code: str, file_path: str = None):
     - The tool will return the path to the generated image.
     - any files uploaded to the execution environment will be deleted after the code is executed.
     - any files uploaded to the execution environment will be in the root folder of the execution environment.
+
+    Returns:
+        str: JSON containing succes status and the path to the generated image.
     """
     # Check execution mode
     execution_mode = execution_mode_ctx.get()
@@ -1185,7 +1210,12 @@ def generate_chart(code: str, file_path: str = None):
                         "message": "Chart generated successfully in Sandbox."
                     })
                 else:
-                     return f"Code executed in E2B but no chart was produced. Output: {output}"
+                     return json.dumps({
+                        "status": "error",
+                        "output": output,
+                        "image_path": generated_file,
+                        "message": "Code executed but no chart was generated."
+                    })
 
         except Exception as e:
             return f"Error executing code in E2B Sandbox: {str(e)}"
@@ -1196,7 +1226,7 @@ def generate_chart(code: str, file_path: str = None):
     
     # Create a captured output stream
     output_capture = io.StringIO()
-    
+    print(output_capture)
     try:
         # Redirect stdout
         with contextlib.redirect_stdout(output_capture):
@@ -1250,10 +1280,15 @@ def generate_chart(code: str, file_path: str = None):
                 "status": "success",
                 "output": output,
                 "image_path": generated_file,
-                "message": "Chart generated successfully. I will now analyze it."
+                "message": "Chart generated successfully."
             })
         else:
-            return f"Code executed but no chart was saved. Did you forget `plt.savefig(...)`? Output: {output}"
+            return json.dumps({
+                "status": "error",
+                "output": output,
+                "image_path": generated_file,
+                "message": "Code executed but no chart was generated."
+            })
         
     except Exception as e:
         print(f"Error in generate_chart: {str(e)}")
@@ -1285,6 +1320,7 @@ def generate_plotly_chart(code: str, file_path: str = None):
     - The tool will automatically save `fig` as both a static PNG (for preview) and an interactive HTML file.
     - You do NOT need to call `fig.write_image` or `fig.write_html` yourself, but you can if you want specific filenames.
     - Use `import plotly.express as px` or `import plotly.graph_objects as go`.
+    - After completing of this task, make sure you verify all the items of your execution plan have been completed. If not, continu to do so. 
     """
     # Check execution mode
     execution_mode = execution_mode_ctx.get()
@@ -1426,7 +1462,12 @@ print("JSON_RESULT:" + json.dumps(generated_files))
                 return json.dumps(response_data)
 
         except Exception as e:
-            return f"Error executing Plotly code in E2B Sandbox: {str(e)}"
+            return json.dumps({
+                "status": "error",
+                "output": output,
+                "image_path": generated_file,
+                "message": "Code executed but no chart was generated."
+            })
 
     # Local Execution (Default)
     # Ensure generated directory exists
@@ -1522,7 +1563,12 @@ print("JSON_RESULT:" + json.dumps(generated_files))
 
             return json.dumps(response_data)
         else:
-            return f"Code executed but no chart was saved. Did you assign the figure to `fig`? Output: {output}"
+            return json.dumps({
+                "status": "error",
+                "output": output,
+                "image_path": generated_file,
+                "message": "Code executed but no chart was saved. Did you assign the figure to `fig`?"
+            })
         
     except Exception as e:
         print(f"Error in generate_plotly_chart: {str(e)}")
@@ -2170,12 +2216,14 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 current_instruction += """\n\n- You have access to a 'generate_chart' tool using matplotlib. 
                 Use this for standard charts (bar, line, pie, scatter, histograms). 
                 If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
+                It returns JSON containing the path to the generated image (if successful). 
                 DO NOT provide Python code to the user - ALWAYS call the tool."""
                 
                 tools.append(generate_plotly_chart)
                 current_instruction += """\n\n- You have access to a 'generate_plotly_chart' tool using Plotly. 
                 Use this for ADVANCED visualizations: 3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps. 
-                if a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
+                If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
+                It returns JSON containing the path to the generated image (if successful). 
                 DO NOT provide Python code to the user - ALWAYS call the tool. Use this when matplotlib's generate_chart cannot handle the request."""
 
                 tools.append(wolfram_alpha_query)
@@ -2233,6 +2281,10 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             append them to the very end of your response as a JSON object with the key 'suggestions', 
             like this: {"suggestions": ["Action 1", "Action 2"]}. Do not wrap this in markdown code blocks. 
             Make sure it is the last thing in your response."""
+
+            current_instruction += """\n\n- Here is a rule for our entire conversation:
+            In a request that requires multiple steps, after completing all the steps for a request, you must provide a single, comprehensive summary of all information gathered and actions taken. 
+            Do not omit the results of any intermediate steps. If any charts were generated, include the path to the image in the summary."""
 
             current_instruction += """\n\n- when providing a URL make sure it's clickable, with target being a new tab"""
             current_instruction += """\n\n- when using search_web tool, remember the urls that were used"""
@@ -2364,7 +2416,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             elif fn_name == "read_uploaded_file":
                                 api_response = read_uploaded_file(fn_args.get("file_name"))
                             elif fn_name == "write_source_code":
-                                api_response = write_source_code(fn_args.get("file_path"), fn_args.get("code"))
+                                api_response = write_source_code(session_id, fn_args.get("file_path"), fn_args.get("code"))  
                             elif fn_name == "import_package":
                                 api_response = import_package(fn_args.get("package_name"))
                             elif fn_name == "execute_calculation":
@@ -2672,9 +2724,13 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             "parts": [{"text": continue_msg}]
                         })
                         # For now commented out : Save the continue message to history
-                        # save_message(session_id, "user", continue_msg)
+                        save_message(session_id, "user", continue_msg)
                         
-                        # Notify UI
+                        #testing, displaying the response text 
+                        #yield format_sse(render_bot_message(full_response_text, stream_id=stream_id, final=True))
+                        #yield format_sse("", event="close")
+
+                        # Notify UI (commented out)
                         yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Bear with me, I am fixing encountered issues ({auto_continue_count}/{max_auto_continues})...</div>')
                     break  # Only trigger once per response
             
