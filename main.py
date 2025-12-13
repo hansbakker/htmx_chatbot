@@ -92,6 +92,7 @@ RETRY_PHRASES = [
     "I'll calculate",
     "I will calculate",
     "Here is"
+    "first I need"
 ]
 
 # Custom Providers
@@ -891,6 +892,7 @@ def import_package(package_name,install=True):
     and then imports it.
     Use this tool when you need to use a specific package, that is not installed to solve a problem involving the execution of code.
     Use this tool also when you only want to check if a package is installed, but for a good reason you do not want to install when it's not installed (install=False).
+    Useless when running code in sandbox mode, but you would not be aware of that, but good to know.
     Args:
         package_name (str): The name of the package on PyPI (e.g., "PyYAML").
         install (bool): Whether to install the package if it is not installed. Default is True.
@@ -898,6 +900,9 @@ def import_package(package_name,install=True):
     Returns:
         module: The imported module object (or errormessage if failed to install)
     """
+    execution_mode = execution_mode_ctx.get()
+    if execution_mode == "e2b":
+        return {"response": "Running in sandbox code execution mode, cannot import packages with this tool, use execute_calculation, generate_chart or generate_plotly_chart instead."}
     try:
         print(f"Importing {package_name}")
         res = importlib.import_module(package_name)
@@ -905,6 +910,7 @@ def import_package(package_name,install=True):
     except ImportError:
         try:
             if install:
+                
                 print(f"Failed to import {package_name}, installing...")
                 subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])            
                 res = importlib.import_module(package_name)
@@ -1075,7 +1081,7 @@ def crawl_website(url: str, max_depth: int = 2, limit: int = 10, instructions: s
     except Exception as e:
         return f"Error crawling website: {str(e)}"
 
-def execute_calculation(code: str, file_path: str = None): 
+def execute_calculation(code: str, file_path: str = None, custom_package: str = None, timeout: int = None): 
     """
     Executes Python code for calculations, logic, and text processing.
     Use this for math, data analysis, or string manipulation.
@@ -1083,6 +1089,8 @@ def execute_calculation(code: str, file_path: str = None):
     Args:
         code (str): The Python code to execute.
         file_path (str): Optional file path to upload to the execution environment.
+        custom_package (str): Optional custom package to install in the execution environment.
+        timeout (int): Optional timeout in seconds.
 
     IMPORTANT:
     - This tool does NOT support plotting or image generation. Use 'generate_chart' for that.
@@ -1102,8 +1110,14 @@ def execute_calculation(code: str, file_path: str = None):
         from e2b_code_interpreter import Sandbox
         try:
             # Get timeout
-            timeout = int(get_setting("e2b_timeout", "300"))
+            if timeout is None:
+                timeout = int(get_setting("e2b_timeout", "300"))
+            else:
+                timeout = int(timeout)
+                print(f"Using custom sandbox timeout: {timeout}")
             with Sandbox.create() as sandbox:
+                # check datafile was provided for the code to use.
+                # if so, upload it to the sandbox
                 if file_path:
                     # Sanitize input to prevent directory traversal
                     file_name = os.path.basename(file_path)
@@ -1114,9 +1128,18 @@ def execute_calculation(code: str, file_path: str = None):
                     with open(file_path, "rb") as f:
                         dataset_path_in_sandbox = sandbox.files.write(file_name, f) # Upload the file to the sandbox
                         print(f"File uploaded to E2B: {dataset_path_in_sandbox}")
+                if custom_package:
+                    # install the custom package
+                    try:
+                        print(f"Installing custom package {custom_package}")
+                        sandbox.commands.run(f"pip install {custom_package}")
+                    except Exception as e:
+                        print(f"Error installing custom package {custom_package}: {str(e)}")
+                        return f"Error installing custom package {custom_package}: {str(e)}"
                 execution = sandbox.run_code(code, timeout=timeout)
                 
                 if execution.error:
+                    print(f"Error in E2B Sandbox: {execution.error.name}: {execution.error.value}\n{execution.error.traceback}")
                     return f"Error in E2B Sandbox: {execution.error.name}: {execution.error.value}\n{execution.error.traceback}"
                 
                 output = ""
@@ -1150,13 +1173,15 @@ def execute_calculation(code: str, file_path: str = None):
     except Exception as e:
         return f"Error executing code: {str(e)}"
 
-def generate_chart(code: str, file_path: str = None):
+def generate_chart(code: str, file_path: str = None, custom_package: str = None, timeout: int = None):
     """
     Generates a chart or plot using Python and matplotlib.
     Use this tool WHENEVER the user asks for a visualization, graph, or chart.
     args:
         code (str): The Python code to execute.
         file_path (str): Optional file path to upload to the E2B sandbox.
+        custom_package (str): Optional custom package to install in the E2B sandbox.
+        timeout (int): Optional timeout in seconds.
     
     IMPORTANT:
     - You MUST use `plt.savefig('plot.png')` (or any filename ending in .png) to save the plot.
@@ -1178,7 +1203,11 @@ def generate_chart(code: str, file_path: str = None):
         print("Generating chart in E2B Sandbox...")
         try:
             # Get timeout
-            timeout = int(get_setting("e2b_timeout", "300"))
+            if timeout is None:
+                timeout = int(get_setting("e2b_timeout", "300"))
+            else:
+                timeout = int(timeout)
+                print(f"Using custom sandbox timeout: {timeout}")
             with Sandbox.create() as sandbox:
                 if file_path:
                     # Sanitize input to prevent directory traversal
@@ -1190,8 +1219,19 @@ def generate_chart(code: str, file_path: str = None):
                     with open(file_path, "rb") as f:
                         dataset_path_in_sandbox = sandbox.files.write(file_name, f) # Upload the file to the sandbox
                         print(f"File uploaded to E2B: {dataset_path_in_sandbox}")
+                
+                if custom_package:
+                    # install the custom package
+                    try:
+                        print(f"Installing custom package {custom_package} in E2B Sandbox...")  
+                        sandbox.commands.run(f"pip install {custom_package}")
+                    except Exception as e:
+                        print(f"Error installing custom package {custom_package}: {str(e)}")
+                        return f"Error installing custom package {custom_package}: {str(e)}"
+                
                 execution = sandbox.run_code(code, timeout=timeout)
                 if execution.error:
+                    print(f"Error in E2B Sandbox: {execution.error.name}: {execution.error.value}")
                     return f"Error in E2B Sandbox: {execution.error.name}: {execution.error.value}"
 
                 import base64
@@ -1316,7 +1356,7 @@ def generate_chart(code: str, file_path: str = None):
         return f"Error generating chart: {str(e)}"
 
 
-def generate_plotly_chart(code: str, file_path: str = None):
+def generate_plotly_chart(code: str, file_path: str = None, custom_package: str = None, timeout: int = None):
     """
     Generates an advanced chart using Python and Plotly.
     Use this tool for complex, interactive, or 3D visualizations that matplotlib cannot handle well.
@@ -1326,6 +1366,8 @@ def generate_plotly_chart(code: str, file_path: str = None):
     args:
         code (str): The Python code to execute. 
         file_path (str): Optional file path to upload to the execution environment.
+        custom_package (str): Optional custom package to install in the execution environment.
+        timeout (int): Optional timeout in seconds.
 
     Examples of when to use this over generate_chart:
     - 3D plots and surfaces
@@ -1351,7 +1393,11 @@ def generate_plotly_chart(code: str, file_path: str = None):
         print("Generating Plotly chart in E2B Sandbox...")
         try:
             # Get timeout
-            timeout = int(get_setting("e2b_timeout", "300"))
+            if timeout is None:
+                timeout = int(get_setting("e2b_timeout", "300"))
+            else:
+                timeout = int(timeout)
+                print(f"Using custom sandbox timeout: {timeout}")
             
             with Sandbox.create() as sandbox:
                 # Install kaleido for PNG export (version 0.2.1 is self-contained)
@@ -1367,10 +1413,19 @@ def generate_plotly_chart(code: str, file_path: str = None):
                     with open(file_path, "rb") as f:
                         dataset_path_in_sandbox = sandbox.files.write(file_name, f) # Upload the file to the sandbox
                         print(f"File uploaded to E2B: {dataset_path_in_sandbox}")
-
+                
+                if custom_package:
+                    # install the custom package
+                    try:
+                        print(f"Installing custom package {custom_package} in E2B Sandbox...")
+                        sandbox.commands.run(f"pip install {custom_package}")
+                    except Exception as e:
+                        print(f"Error installing custom package {custom_package}: {str(e)}")
+                        return f"Error installing custom package {custom_package}: {str(e)}"
                 # 1. Run User Code
                 execution = sandbox.run_code(code, timeout=timeout)
                 if execution.error:
+                    print(f"Error in E2B Sandbox: {execution.error.name}: {execution.error.value}")
                     return f"Error in E2B Sandbox: {execution.error.name}: {execution.error.value}"
 
                 output = ""
@@ -2154,7 +2209,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                     print(f"File is data (not media). Skipping Provider upload: {local_path}")
                     # Provide system notification about the file
                     file_name = os.path.basename(local_path)
-                    current_parts.append(f"[System Notification: User uploaded file '{file_name}' to '{local_path}'. You can use tools like 'read_uploaded_file' to read it, or pass the path to 'execute_calculation' or 'generate_chart'.]")
+                    current_parts.append(f"[System Notification: User uploaded file '{file_name}' to '{local_path}'. You can use tools like 'read_uploaded_file' to read it, or pass the path to 'execute_calculation', 'generate_chart' or 'generate_plotly_chart'.]")
 
             messages_payload.append({
                 "role": "user",
@@ -2225,18 +2280,25 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 tools.append(import_package)
                 current_instruction += """\n\n- You have access to an 'import_package' tool. 
                 Use it for checking if a package is installed (install=False) or installing and importing directly (install=True). It returns TEXT output. 
+                When running in sandbox mode, the 'import_package' tool will fail. In that case, you can provide execute_calculation, generate_chart or generate_plotly_chart with a  custom package name to install and import.
                 It CANNOT generate images. It can also just check if a package is installed."""
-                
+                default_timeout = int(get_setting("e2b_timeout", "300"))
                 tools.append(execute_calculation)
                 current_instruction += """\n\n- You have access to an 'execute_calculation' tool. 
                 Use it for math, logic, text processing, or data analysis (numpy/pandas) or any arbitray python code executions. 
                 If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
+                If needed you can install custom modules/packages using the 'import_package' tool, but this will fail if code execution is running in sandbox mode. 
+                When running in sandbox mode, the 'import_package' tool will fail. In that case, you can provide execute_calculation tool with a list of module/package names to install and import.
+                You can also provide a timeout in seconds to the execute_calculation tool ONLY if you expect the code to take longer than the default timeout of {default_timeout} seconds.
                 It returns TEXT output. It CANNOT generate images. DO NOT provide Python code to the user - ALWAYS call the tool."""
 
                 tools.append(generate_chart)
                 current_instruction += """\n\n- You have access to a 'generate_chart' tool using matplotlib. 
                 Use this for standard charts (bar, line, pie, scatter, histograms). 
                 If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
+                 If needed you can install custom modules/packages using the 'import_package' tool, but this will fail if code execution is running in sandbox mode. 
+                When running in sandbox mode, the 'import_package' tool will fail. In that case, you can provide execute_calculation tool with a list of module/package names to install and import.
+                You can also provide a timeout in seconds to the generate_chart tool ONLYif you expect the code to take longer than the default timeout of {default_timeout} seconds.
                 It returns JSON containing the path to the generated image (if successful). 
                 DO NOT provide Python code to the user - ALWAYS call the tool."""
                 
@@ -2244,6 +2306,9 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 current_instruction += """\n\n- You have access to a 'generate_plotly_chart' tool using Plotly. 
                 Use this for ADVANCED visualizations: 3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps. 
                 If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
+                 If needed you can install custom modules/packages using the 'import_package' tool, but this will fail if code execution is running in sandbox mode. 
+                When running in sandbox mode, the 'import_package' tool will fail. In that case, you can provide execute_calculation tool with a list of module/package names to install and import. 
+                You can also provide a timeout in seconds to the generate_plotly_chart tool ONLY if you expect the code to take longer than the default timeout of {default_timeout} seconds.
                 It returns JSON containing the path to the generated image (if successful). 
                 DO NOT provide Python code to the user - ALWAYS call the tool. Use this when matplotlib's generate_chart cannot handle the request."""
 
@@ -2300,7 +2365,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             
             current_instruction += """\n\n- if you have actionable follow-up suggestions, 
             append them to the very end of your response as a JSON object with the key 'suggestions', 
-            like this: {"suggestions": ["Action 1", "Action 2"]}. Do not wrap this in markdown code blocks. 
+            like this: {"suggestions": ["Action 1", "Action 2"]}. DO NOT wrap this in markdown code blocks. Doing so will is a FAILURE.
+            Formulate the suggestions in a way that the user can directly execute them, not as a question to the user, such as "would you like to...".
             Make sure it is the last thing in your response."""
 
             current_instruction += """\n\n- Here is a rule for our entire conversation:
@@ -2441,11 +2507,11 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             elif fn_name == "import_package":
                                 api_response = import_package(fn_args.get("package_name"))
                             elif fn_name == "execute_calculation":
-                                api_response = execute_calculation(fn_args.get("code"), fn_args.get("file_path"))
+                                api_response = execute_calculation(fn_args.get("code"), fn_args.get("file_path"), fn_args.get("custom_package"), fn_args.get("timeout"))
                             elif fn_name == "generate_chart":
-                                api_response = generate_chart(fn_args.get("code"), fn_args.get("file_path"))
+                                api_response = generate_chart(fn_args.get("code"), fn_args.get("file_path"), fn_args.get("custom_package"), fn_args.get("timeout"))
                             elif fn_name == "generate_plotly_chart":
-                                api_response = generate_plotly_chart(fn_args.get("code"), fn_args.get("file_path"))
+                                api_response = generate_plotly_chart(fn_args.get("code"), fn_args.get("file_path"), fn_args.get("custom_package"), fn_args.get("timeout"))
                             elif fn_name == "generate_image":
                                 api_response = generate_image(fn_args.get("description"))
                             elif fn_name == "get_current_datetime":
@@ -2744,15 +2810,11 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             "role": "user",
                             "parts": [{"text": continue_msg}]
                         })
-                        # For now commented out : Save the continue message to history
+                        # Save the continue message to history
                         save_message(session_id, "user", continue_msg)
                         
-                        #testing, displaying the response text 
-                        #yield format_sse(render_bot_message(full_response_text, stream_id=stream_id, final=True))
-                        #yield format_sse("", event="close")
-
                         # Notify UI (commented out)
-                        yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Bear with me, I am fixing encountered issues ({auto_continue_count}/{max_auto_continues})...</div>')
+                        yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Working... ({auto_continue_count}/{max_auto_continues})...</div>')
                     break  # Only trigger once per response
             
             # If not auto-continuing, finalize
