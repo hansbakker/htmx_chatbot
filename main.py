@@ -1784,7 +1784,11 @@ def generate_image(description: str):
 def get_coordinates(location: str):
     """
     Returns the latitude and longitude of a specific location (city, landmark, address).
-    Use this tool when the user asks for coordinates or location data.
+    Use this tool when you need coordinates or location data to answer a users question.
+    args:
+        location (str): The location to get coordinates for.
+    returns:
+        str: The latitude and longitude of the location.
     """
     try:
         geolocator = Nominatim(user_agent="htmx_chatbot")
@@ -2374,8 +2378,10 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
 
             Here is a rule for our entire conversation:
             In a request that requires multiple steps, after completing all the steps for a request, you must provide a single, comprehensive summary of all information gathered and actions taken. 
+            Ensure that if any charts were generated, include the image in the summary and a link to the image if it's an interactive chart that cannot be directly displayed.
             Do not omit the results of any intermediate steps. If any charts were generated, include the path to the image in the summary.
-
+            Before you provide your final answer to any of my requests, I want you to first perform a 'completeness check' to ensure you've included the results from every single tool you used. Then, present everything together.
+            
             when providing a URL make sure it's clickable, with target being a new tab
             when using search_web tool, remember the urls that were used
             When you have still work to do before the answer is final, end every intermediate response with "/nContinuing..."
@@ -2725,8 +2731,14 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                             # Notify UI
                                             yield format_sse(f'<div class="text-xs text-gray-500 mb-2 italic">Chart generated successfully.</div>')
                                             
+                                            # Add synthetic "continue" user message
+                                            continue_msg = "continue"
+                                            messages_payload.append({
+                                                "role": "user",
+                                                "parts": [{"text": continue_msg}]
+                                            })
                                             # Break - chart/link is displayed
-                                            break
+                                            # break
                                         
                                 except Exception as e:
                                     print(f"Error displaying chart: {e}")
@@ -2750,7 +2762,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                         
                                         # Set response text for history (keep as markdown so it persists)
                                         full_response_text = api_response
-                                        
+ 
                                         # Break out of loop
                                         print("Breaking out of loop after image display")
                                         break
