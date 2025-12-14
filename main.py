@@ -92,7 +92,9 @@ RETRY_PHRASES = [
     "I'll calculate",
     "I will calculate",
     "Here is"
-    "first I need"
+    "first, I need",
+    "first I need",
+    "Continuing..."
 ]
 
 # Custom Providers
@@ -2365,16 +2367,19 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             
             current_instruction += """\n\n- if you have actionable follow-up suggestions, 
             append them to the very end of your response as a JSON object with the key 'suggestions', 
-            like this: {"suggestions": ["Action 1", "Action 2"]}. DO NOT wrap this in markdown code blocks. Doing so will is a FAILURE.
+            DO NOT wrap this JSON object in markdown code blocks. Doing so will is a FAILURE.
+            like this: {"suggestions": ["Action 1", "Action 2"]}. 
             Formulate the suggestions in a way that the user can directly execute them, not as a question to the user, such as "would you like to...".
-            Make sure it is the last thing in your response."""
+            Make sure it is the last thing in your response.
 
-            current_instruction += """\n\n- Here is a rule for our entire conversation:
+            Here is a rule for our entire conversation:
             In a request that requires multiple steps, after completing all the steps for a request, you must provide a single, comprehensive summary of all information gathered and actions taken. 
-            Do not omit the results of any intermediate steps. If any charts were generated, include the path to the image in the summary."""
+            Do not omit the results of any intermediate steps. If any charts were generated, include the path to the image in the summary.
 
-            current_instruction += """\n\n- when providing a URL make sure it's clickable, with target being a new tab"""
-            current_instruction += """\n\n- when using search_web tool, remember the urls that were used"""
+            when providing a URL make sure it's clickable, with target being a new tab
+            when using search_web tool, remember the urls that were used
+            When you have still work to do before the answer is final, end every intermediate response with "/nContinuing..."
+            """
             
             # We need to handle potential function calls in a loop
             # Since we are streaming, this is a bit tricky with the official SDK's generate_content(stream=True)
@@ -2472,14 +2477,14 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             yield format_sse("<div><strong>Error:</strong> No response from AI (Safety Block or API Error).</div>")
                             return
 
-                        # Check for function call in the full response
+                        # Check for empty response in the full response
                         if not response.candidates[0].content.parts:
                              print("Candidate returned but no parts after retries.")
                              yield format_sse("<div><strong>Error:</strong> Empty response content.</div>")
                              return
 
                         part = response.candidates[0].content.parts[0]
-                    
+                        # check for function call in the response
                         if part.function_call:
                             print(f"Function call detected: {part.function_call.name}")
                             fn_name = part.function_call.name
@@ -2779,7 +2784,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                     if full_response_text:
                         break
 
-            # 3. Save to Session History
+            # Save to Session History
             # Ensure we ALWAYS save a model response to prevent history corruption (dangling user messages)
             if not full_response_text:
                 print("Warning: Full response text is empty. Saving placeholder.")
@@ -2789,7 +2794,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
 
             save_message(session_id, "model", full_response_text)
             
-            # 5. Check for auto-continue (retry phrases)
+            # Check for auto-continue (retry phrases)
             # Get last 120 chars and check for retry phrases
             response_end = full_response_text[-120:].lower() if len(full_response_text) > 120 else full_response_text.lower()
             
@@ -2811,7 +2816,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             "parts": [{"text": continue_msg}]
                         })
                         # Save the continue message to history
-                        save_message(session_id, "user", continue_msg)
+                        # save_message(session_id, "user", continue_msg)
                         
                         # Notify UI (commented out)
                         yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Working... ({auto_continue_count}/{max_auto_continues})...</div>')
