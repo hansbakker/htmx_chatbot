@@ -3,6 +3,7 @@ import asyncio
 import uuid
 import sqlite3
 import markdown
+from xhtml2pdf import pisa
 import io
 import sys
 import traceback
@@ -1082,6 +1083,63 @@ def crawl_website(url: str, max_depth: int = 2, limit: int = 10, instructions: s
         })
     except Exception as e:
         return f"Error crawling website: {str(e)}"
+
+def convert_md_to_pdf(markdown_text: str, filename: str = None):
+    """
+    Converts Markdown text to a PDF file and saves it to the static/generated directory.
+    Use this tool when the user asks to create a PDF document from text or markdown content.
+    Args:
+        markdown_text (str): The markdown content to convert.
+        filename (str): Optional filename for the PDF (ending in .pdf). If not provided, a random name is generated.
+    Returns:
+        str: The URL to the generated PDF file.
+    """
+    try:
+        # Convert Markdown to HTML
+        html_content = markdown.markdown(markdown_text, extensions=['extra', 'codehilite'])
+        
+        # Add basic styling
+        full_html = f"""
+        <html>
+        <head>
+        <style>
+            body {{ font-family: sans-serif; padding: 20px; }}
+            pre {{ background-color: #f0f0f0; padding: 10px; border-radius: 5px; }}
+            code {{ font-family: monospace; }}
+            h1, h2, h3 {{ color: #333; }}
+            table {{ border-collapse: collapse; width: 100%; }}
+            th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+            th {{ background-color: #f2f2f2; }}
+        </style>
+        </head>
+        <body>
+        {html_content}
+        </body>
+        </html>
+        """
+        
+        # Generate Filename
+        if not filename:
+            filename = f"doc_{uuid.uuid4().hex[:8]}.pdf"
+        elif not filename.endswith('.pdf'):
+            filename += ".pdf"
+            
+        # Ensure directory exists
+        output_dir = "static/generated"
+        os.makedirs(output_dir, exist_ok=True)
+        
+        output_path = os.path.join(output_dir, filename)
+        
+        # Generate PDF
+        with open(output_path, "wb") as pdf_file:
+            pisa_status = pisa.CreatePDF(src=full_html, dest=pdf_file)
+            
+        if pisa_status.err:
+            return f"Error generating PDF: {pisa_status.err}"
+            
+        return f"PDF created successfully. url: /{output_path}"
+    except Exception as e:
+        return f"Error converting to PDF: {str(e)}"
 
 def execute_calculation(code: str, file_path: str = None, custom_package: str = None, timeout: int = None): 
     """
@@ -2285,6 +2343,12 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 Leave session_id empty in the function call, this is automatically taken from the environment variable.
                 When providing download links for files created by the 'write_source_code' tool, ALWAYS use the relative web path starting with '/' (e.g., '/static/generated_code/filename.ext'). NEVER prefix the URL with 'sandbox:', 'file://', or any other scheme.
                 It returns TEXT output. It CANNOT generate images."""
+
+                tools.append(convert_md_to_pdf)
+                current_instruction += """\n\n- You have access to a 'convert_md_to_pdf' tool.
+                Use it to convert Markdown text to a PDF file. It returns a URL to the generated PDF.
+                Always provide the link to the user so they can download it.
+                """
                
                 if(get_setting("execution_mode", "") != "e2b"):
                     tools.append(import_package)
@@ -2516,6 +2580,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                     fn_args.get("limit", 10),
                                     fn_args.get("instructions")
                                 )
+                            elif fn_name == "convert_md_to_pdf":
+                                api_response = convert_md_to_pdf(fn_args.get("markdown_text"), fn_args.get("file_name"))
                             elif fn_name == "read_source_code":
                                 api_response = read_source_code(fn_args.get("file_path"))
                             elif fn_name == "read_uploaded_file":

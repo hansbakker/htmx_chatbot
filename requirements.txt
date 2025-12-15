@@ -13,3 +13,4 @@ numpy
 plotly
 kaleido
 openai
+xhtml2pdf

@@ -25,6 +25,7 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
     *   **File Input:** Upload any file type (PDFs, CSVs, text files, images, etc.) to analyze and ask questions about them.
     *   **Image Generation:** Generate artistic images using Pollinations.ai via the `generate_image` tool.
     *   **Chart/Graph Generation:** Create data visualizations (bar charts, line graphs, scatter plots, etc.) using matplotlib via the `generate_chart` tool.
+    *   **PDF Generation:** Convert Markdown content to downloadable PDF files via the `convert_md_to_pdf` tool (uses `xhtml2pdf`).
 *   **File Context Management:** 
     *   When analyzing files, conversation history is temporarily cleared to ensure API compatibility.
     *   Use the "Clear File Context" button to restore tools and conversation history after file analysis.
@@ -56,6 +57,10 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 *   A [Gemini API Key](https://aistudio.google.com/) (if using Gemini).
 *   An [OpenAI API Key](https://platform.openai.com/) (if using OpenAI).
 *   A [Tavily API Key](https://tavily.com/) for web search.
+*   **System Dependencies (macOS):** `cairo` and `pango` (required for PDF generation).
+    ```bash
+    brew install cairo pango
+    ```
 
 ## Installation
 
@@ -200,6 +205,7 @@ The chatbot has access to the following tools:
 11. **`get_weather(location)`**: Returns current weather for a location via XWeather MCP.
 12. **`get_forecast_weather(location)`**: Returns multi-day weather forecast via XWeather MCP.
 13. **`get_precipitation_timing(location)`**: Returns rain/snow start/stop timing via XWeather MCP.
+14. **`convert_md_to_pdf(markdown_text, filename)`**: Converts Markdown content to a PDF file and returns the download link.
 
 ## Troubleshooting
 
