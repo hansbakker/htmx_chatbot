@@ -386,15 +386,15 @@
 		}
 
 
-		// Listen for HTMX swaps to highlight code and render math
-		document.body.addEventListener('htmx:afterSwap', function (evt) {
+		// Use htmx.onLoad for reliable rendering of new content (including OOB swaps)
+		htmx.onLoad(function (content) {
 			// Highlight code
-			evt.detail.target.querySelectorAll('pre code').forEach((block) => {
+			content.querySelectorAll('pre code').forEach((block) => {
 				hljs.highlightElement(block);
 			});
 
 			// Render Math
-			renderMathInElement(evt.detail.target, {
+			renderMathInElement(content, {
 				delimiters: [
 					{ left: '$$', right: '$$', display: true },
 					{ left: '$', right: '$', display: false },
@@ -403,7 +403,10 @@
 				],
 				throwOnError: false
 			});
+		});
 
+		// Listen for HTMX swaps to handle scrolling
+		document.body.addEventListener('htmx:afterSwap', function (evt) {
 			// Auto-scroll to bottom on new content
 			const chatWindow = document.getElementById('chat-window');
 			chatWindow.scrollTop = chatWindow.scrollHeight;

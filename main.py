@@ -947,7 +947,7 @@ def write_source_code(session_id: str, file_path: str, code: str):
                         conn.execute("INSERT INTO generated_code (session_id, file_path) VALUES (?, ?)", (session_id, file_path))
                 except Exception as e:
                     print(f"Failed to insert file path into database: {e}")
-                return f"Successfully wrote file {file_path}"
+                return f"Successfully wrote file {file_path}, with url : `/{file_path}`"
         else:
             return f"Target file name not allowed: {file_path}"    
     except Exception as e:
@@ -1660,7 +1660,9 @@ def wolfram_alpha_query(query: str):
     - Scientific data (chemistry, physics, astronomy)
     - Unit conversions and physical constants
     - Factual queries about geography, history, etc.
-    
+    args:
+    query: The query to send to Wolfram Alpha.
+
     The query should be a single-line natural language string or math expression.
     """
     app_id = os.getenv("WOLFRAM_ALPHA_APP_ID")
@@ -2281,20 +2283,22 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 tools.append(write_source_code)
                 current_instruction += """\n\n- You have access to a 'write_source_code' tool. Use it for writing (modified) source code to file. 
                 Leave session_id empty in the function call, this is automatically taken from the environment variable.
+                When providing download links for files created by the 'write_source_code' tool, ALWAYS use the relative web path starting with '/' (e.g., '/static/generated_code/filename.ext'). NEVER prefix the URL with 'sandbox:', 'file://', or any other scheme.
                 It returns TEXT output. It CANNOT generate images."""
-
-                tools.append(import_package)
-                current_instruction += """\n\n- You have access to an 'import_package' tool. 
-                Use it for checking if a package is installed (install=False) or installing and importing directly (install=True). It returns TEXT output. 
-                When running in sandbox mode, the 'import_package' tool will fail. In that case, you can provide execute_calculation, generate_chart or generate_plotly_chart with a  custom package name to install and import.
+               
+                if(get_setting("execution_mode", "") != "e2b"):
+                    tools.append(import_package)
+                    current_instruction += """\n\n- You have access to an 'import_package' tool. 
+                Use it for checking if a package is installed (install=False) or installing and importing directly (install=True). It returns TEXT output.  
                 It CANNOT generate images. It can also just check if a package is installed."""
+                    
+                
                 default_timeout = int(get_setting("e2b_timeout", "300"))
                 tools.append(execute_calculation)
                 current_instruction += """\n\n- You have access to an 'execute_calculation' tool. 
                 Use it for math, logic, text processing, or data analysis (numpy/pandas) or any arbitray python code executions. 
                 If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
-                If needed you can install custom modules/packages using the 'import_package' tool, but this will fail if code execution is running in sandbox mode. 
-                When running in sandbox mode, the 'import_package' tool will fail. In that case, you can provide execute_calculation tool with a list of module/package names to install and import.
+                you can provide execute_calculation tool with the name of module/package to install and import.
                 You can also provide a timeout in seconds to the execute_calculation tool ONLY if you expect the code to take longer than the default timeout of {default_timeout} seconds.
                 It returns TEXT output. It CANNOT generate images. DO NOT provide Python code to the user - ALWAYS call the tool."""
 
@@ -2302,25 +2306,24 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 current_instruction += """\n\n- You have access to a 'generate_chart' tool using matplotlib. 
                 Use this for standard charts (bar, line, pie, scatter, histograms). 
                 If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
-                 If needed you can install custom modules/packages using the 'import_package' tool, but this will fail if code execution is running in sandbox mode. 
-                When running in sandbox mode, the 'import_package' tool will fail. In that case, you can provide execute_calculation tool with a list of module/package names to install and import.
-                You can also provide a timeout in seconds to the generate_chart tool ONLYif you expect the code to take longer than the default timeout of {default_timeout} seconds.
-                It returns JSON containing the path to the generated image (if successful). 
+                you can provide generate_chart tool with the name of module/package to install and import.
+                You can also provide a timeout in seconds to the generate_chart tool ONLY if you expect the code to take longer than the default timeout of {default_timeout} seconds.
+                It returns JSON containing the path to the generated chart (image file) (if successful). 
                 DO NOT provide Python code to the user - ALWAYS call the tool."""
                 
                 tools.append(generate_plotly_chart)
                 current_instruction += """\n\n- You have access to a 'generate_plotly_chart' tool using Plotly. 
                 Use this for ADVANCED visualizations: 3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps. 
                 If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
-                 If needed you can install custom modules/packages using the 'import_package' tool, but this will fail if code execution is running in sandbox mode. 
-                When running in sandbox mode, the 'import_package' tool will fail. In that case, you can provide execute_calculation tool with a list of module/package names to install and import. 
+                you can provide generate_plotly_chart tool with the name of module/package to install and import.
                 You can also provide a timeout in seconds to the generate_plotly_chart tool ONLY if you expect the code to take longer than the default timeout of {default_timeout} seconds.
-                It returns JSON containing the path to the generated image (if successful). 
+                It returns JSON containing the path to the generated chart (image file) and/or the generated html file (if successful). 
                 DO NOT provide Python code to the user - ALWAYS call the tool. Use this when matplotlib's generate_chart cannot handle the request."""
 
                 tools.append(wolfram_alpha_query)
                 current_instruction += """\n\n- You have access to a 'wolfram_alpha_query' tool. 
                 Use it for complex math, scientific data, unit conversions, and factual queries that might not be in your knowledge base.
+                When the tool returns images or links to images contemplate using these in your final response.
                 GUIDELINES:
                 Convert inputs to simplified keyword queries (e.g. "France population" instead of "how many people live in France").
                 Send queries in English only.
@@ -2328,7 +2331,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 Use named physical constants (e.g., 'speed of light') without numerical substitution.
                 Include a space between compound units (e.g., "m Ω" instead of "mΩ").
                 If data for multiple properties is needed, make separate calls for each property.
-                If the result is not relevant, try re-sending with 'Assumption' parameters if suggested by Wolfram."""
+                """
 
                 tools.append(generate_image)
                 current_instruction += """\n\n- You have access to a 'generate_image' tool.
@@ -2374,17 +2377,21 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             DO NOT wrap this JSON object in markdown code blocks. Doing so will is a FAILURE.
             like this: {"suggestions": ["Action 1", "Action 2"]}. 
             Formulate the suggestions in a way that the user can directly execute them, not as a question to the user, such as "would you like to...".
-            Make sure it is the last thing in your response.
-
-            Here is a rule for our entire conversation:
-            In a request that requires multiple steps, after completing all the steps for a request, you must provide a single, comprehensive summary of all information gathered and actions taken. 
-            Ensure that if any charts were generated, include the image in the summary and a link to the image if it's an interactive chart that cannot be directly displayed.
-            Do not omit the results of any intermediate steps. If any charts were generated, include the path to the image in the summary.
-            Before you provide your final answer to any of my requests, I want you to first perform a 'completeness check' to ensure you've included the results from every single tool you used. Then, present everything together.
+            Make sure it is the very last thing in your response.
             
-            when providing a URL make sure it's clickable, with target being a new tab
-            when using search_web tool, remember the urls that were used
-            When you have still work to do before the answer is final, end every intermediate response with "/nContinuing..."
+            File Handling Distinction:
+            - Use write_source_code when you need to save a file for the user to download (reports, code files). These are persistent.
+            - Use execute_calculation file uploads for temporary data processing. These files are deleted after execution.
+            
+            Here are the rules for our entire conversation:
+            - In a request that requires multiple steps, after completing all the steps for a request, you must provide a single, comprehensive summary of all information gathered and actions taken. 
+            - Ensure that if any charts were generated, include the image in the summary and a link to the image if it's an interactive chart that cannot be directly displayed.
+            - Do not omit the results of any intermediate steps. If any charts were generated, include the path to the image in the summary.
+            - Before you provide your final answer to any of my requests, I want you to first perform a 'completeness check' to ensure you've included the results from every single tool you used. Then, present everything together.
+            
+            - when providing a URL make sure it's clickable, with target being a new tab
+            - when using search_web tool, remember the urls that were used
+            - When you have still work to do before the answer is final, end every intermediate response with "/nContinuing..."
             """
             
             # We need to handle potential function calls in a loop
