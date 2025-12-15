@@ -905,7 +905,7 @@ def import_package(package_name,install=True):
     """
     execution_mode = execution_mode_ctx.get()
     if execution_mode == "e2b":
-        return {"response": "Running in sandbox code execution mode, cannot import packages with this tool, use execute_calculation, generate_chart or generate_plotly_chart instead."}
+        return {"response": "Failure, running in sandbox code execution mode, cannot import packages with this tool, use execute_calculation, generate_chart or generate_plotly_chart instead."}
     try:
         print(f"Importing {package_name}")
         res = importlib.import_module(package_name)
@@ -913,7 +913,6 @@ def import_package(package_name,install=True):
     except ImportError:
         try:
             if install:
-                
                 print(f"Failed to import {package_name}, installing...")
                 subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])            
                 res = importlib.import_module(package_name)
@@ -1136,7 +1135,15 @@ def convert_md_to_pdf(markdown_text: str, filename: str = None):
             
         if pisa_status.err:
             return f"Error generating PDF: {pisa_status.err}"
-            
+        
+        session_id = session_id_ctx.get()
+        if session_id:
+            try:
+                with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                    conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(output_path))))
+            except Exception as db_e:
+                print(f"Error saving generated file to DB: {db_e}")
+    
         return f"PDF created successfully. url: /{output_path}"
     except Exception as e:
         return f"Error converting to PDF: {str(e)}"
@@ -1812,6 +1819,7 @@ def wolfram_alpha_query(query: str):
         print(f"Error querying Wolfram Alpha: {str(e)}")
         return f"Error querying Wolfram Alpha: {str(e)}"
 
+
 def get_timezone_from_ip(ip_address: str) -> Optional[str]:
     """
     Fetches the timezone for a given IP address using ip-api.com.
@@ -2480,10 +2488,10 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 If data for multiple properties is needed, make separate calls for each property.
                 """
 
-                tools.append(generate_image)
-                current_instruction += """\n\n- You have access to a 'generate_image' tool.
-                 Use it for artistic or creative image requests like 'draw a cat', 'create a sunset landscape', etc. 
-                 DO NOT use this for data visualizations - use generate_chart instead."""
+                #tools.append(generate_image)
+                #current_instruction += """\n\n- You have access to a 'generate_image' tool.
+                #Use it for artistic or creative image requests like 'draw a cat', 'create a sunset landscape', etc. 
+                #DO NOT use this for data visualizations - use generate_chart instead."""
 
                 tools.append(get_current_datetime)
                 current_instruction +="""\n\n- You have access to a 'get_current_datetime' tool. 
