@@ -1141,6 +1141,74 @@ def convert_md_to_pdf(markdown_text: str, filename: str = None):
     except Exception as e:
         return f"Error converting to PDF: {str(e)}"
 
+def rename_chat_tool(new_name: str, session_id: str = None):
+    """
+    Renames a chat session.
+    Args:
+        new_name (str): The new title for the chat.
+        session_id (str, optional): The ID of the session to rename. Defaults to the current session.
+    Returns:
+        str: Success message or error.
+    """
+    target_id = session_id or session_id_ctx.get()
+    if not target_id:
+        return "Error: No session ID provided or found in context."
+    
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.execute("UPDATE conversations SET title = ? WHERE id = ?", (new_name, target_id))
+            conn.commit()
+        return f"Chat renamed to '{new_name}'."
+    except Exception as e:
+        return f"Error renaming chat: {str(e)}"
+
+def archive_chat_tool(session_id: str = None):
+    """
+    Archives a chat session.
+    Args:
+        session_id (str, optional): The ID of the session to archive. Defaults to the current session.
+    Returns:
+        str: Success message or error.
+    """
+    target_id = session_id or session_id_ctx.get()
+    if not target_id:
+        return "Error: No session ID provided or found in context."
+    
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.execute("UPDATE conversations SET is_archived = 1 WHERE id = ?", (target_id,))
+            conn.commit()
+        return "Chat archived."
+    except Exception as e:
+        return f"Error archiving chat: {str(e)}"
+
+def delete_chat_tool(session_id: str = None):
+    """
+    Permanently deletes a chat session.
+    Args:
+        session_id (str, optional): The ID of the session to delete. Defaults to the current session.
+    Returns:
+        str: Success message or error.
+    """
+    target_id = session_id or session_id_ctx.get()
+    if not target_id:
+        return "Error: No session ID provided or found in context."
+    
+    try:
+        # Delete files first
+        try:
+            delete_chat_files(target_id)
+        except Exception as e:
+            print(f"Error deleting files for chat {target_id}: {e}")
+
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.execute("DELETE FROM conversations WHERE id = ?", (target_id,))
+            conn.execute("DELETE FROM messages WHERE session_id = ?", (target_id,))
+            conn.commit()
+        return "Chat deleted."
+    except Exception as e:
+        return f"Error deleting chat: {str(e)}"
+
 def execute_calculation(code: str, file_path: str = None, custom_package: str = None, timeout: int = None): 
     """
     Executes Python code for calculations, logic, and text processing.
@@ -2349,6 +2417,21 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 Use it to convert Markdown text to a PDF file. It returns a URL to the generated PDF.
                 Always provide the link to the user so they can download it.
                 """
+                
+                tools.append(rename_chat_tool)
+                current_instruction += """\n\n- You have access to a 'rename_chat_tool'.
+                Use it to rename the current chat session or a specific session ID.
+                """
+
+                tools.append(archive_chat_tool)
+                current_instruction += """\n\n- You have access to a 'archive_chat_tool'.
+                Use it to archive the current chat session.
+                """
+
+                tools.append(delete_chat_tool)
+                current_instruction += """\n\n- You have access to a 'delete_chat_tool'.
+                Use it to permanently delete a chat session.
+                """
                
                 if(get_setting("execution_mode", "") != "e2b"):
                     tools.append(import_package)
@@ -2582,6 +2665,36 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                 )
                             elif fn_name == "convert_md_to_pdf":
                                 api_response = convert_md_to_pdf(fn_args.get("markdown_text"), fn_args.get("file_name"))
+                            elif fn_name == "rename_chat_tool":
+                                api_response = rename_chat_tool(fn_args.get("new_name"), fn_args.get("session_id"))
+                                # UI Update via OOB Swap
+                                sidebar_html = render_sidebar_html(session_id)
+                                
+                                target_id = fn_args.get("session_id") or session_id
+                                if target_id == session_id:
+                                     yield format_sse(f'<div id="chat-list" hx-swap-oob="innerHTML">{sidebar_html}</div><h1 id="chat-title-header" hx-swap-oob="innerHTML">{fn_args.get("new_name")}</h1>')
+                                else:
+                                     yield format_sse(f'<div id="chat-list" hx-swap-oob="innerHTML">{sidebar_html}</div>')
+                            elif fn_name == "archive_chat_tool":
+                                api_response = archive_chat_tool(fn_args.get("session_id"))
+                                # UI Update via OOB Swap
+                                sidebar_html = render_sidebar_html(session_id)
+                                archived_html = render_archived_list_html()
+                                yield format_sse(f'<div id="chat-list" hx-swap-oob="innerHTML">{sidebar_html}</div><div id="archived-list" hx-swap-oob="innerHTML">{archived_html}</div>')
+                            elif fn_name == "delete_chat_tool":
+                                target_id = fn_args.get("session_id") or session_id
+                                api_response = delete_chat_tool(target_id)
+                                
+                                # Check if we deleted the current session
+                                if target_id == session_id:
+                                    # Force client-side reload/new chat via script
+                                    yield format_sse('<script>document.cookie = "session_id=; path=/; max-age=0"; window.location.href = "/";</script>')
+                                    return # Stop streaming
+                                else:
+                                    # UI Update via OOB Swap
+                                    sidebar_html = render_sidebar_html(session_id)
+                                    archived_html = render_archived_list_html()
+                                    yield format_sse(f'<div id="chat-list" hx-swap-oob="innerHTML">{sidebar_html}</div><div id="archived-list" hx-swap-oob="innerHTML">{archived_html}</div>')
                             elif fn_name == "read_source_code":
                                 api_response = read_source_code(fn_args.get("file_path"))
                             elif fn_name == "read_uploaded_file":
