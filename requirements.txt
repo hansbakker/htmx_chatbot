@@ -14,3 +14,6 @@ plotly
 kaleido
 openai
 xhtml2pdf
+authlib
+itsdangerous
+httpx

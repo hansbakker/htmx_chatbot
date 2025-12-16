@@ -108,6 +108,10 @@ import asyncio
 import traceback
 from contextlib import asynccontextmanager
 import io
+from starlette.middleware.sessions import SessionMiddleware
+from authlib.integrations.starlette_client import OAuth
+from fastapi.responses import RedirectResponse
+from fastapi import Depends, HTTPException, status
 
 # --- 1. CONFIGURATION ---
 load_dotenv()
@@ -128,11 +132,12 @@ tavily_client = TavilyClient(api_key=tavily_api_key) if tavily_api_key else None
 
 # Configure Tavily
 tavily_client = None
-if "TAVILY_API_KEY" in os.environ:
-    tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
-    print(f"Tavily Search: Enabled (Key found: {os.environ['TAVILY_API_KEY'][:4]}...)")
+tavily_api_key = os.environ.get("TAVILY_API_KEY")
+if tavily_api_key:
+    tavily_client = TavilyClient(api_key=tavily_api_key)
+    print(f"Tavily Search: Enabled (Key found: {tavily_api_key[:4]}...)")
 else:
-    print("Tavily Search: Disabled (TAVILY_API_KEY not found in env)")
+    print("Tavily Search: Disabled (TAVILY_API_KEY not found or empty)")
 
 SYSTEM_INSTRUCTION_FILE = "system_instruction.txt"
 
@@ -154,8 +159,22 @@ def save_system_instruction(instruction: str):
         f.write(instruction)
 
 app = FastAPI()
+app.add_middleware(SessionMiddleware, secret_key=os.getenv("SECRET_KEY", os.urandom(24).hex()), https_only=False, same_site="lax")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+
+# Initialize OAuth
+oauth = OAuth()
+oauth.register(
+    name='google',
+    client_id=os.getenv('GOOGLE_CLIENT_ID'),
+    client_secret=os.getenv('GOOGLE_CLIENT_SECRET'),
+    server_metadata_url='https://accounts.google.com/.well-known/openid-configuration',
+    client_kwargs={
+        'scope': 'openid email profile',
+        'prompt': 'select_account',  # Force account selection
+    }
+)
 
 # --- 2. DATABASE & SESSION MANAGEMENT ---
 DB_NAME = "chat.db"
@@ -190,18 +209,37 @@ def init_db():
         conn.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
         
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                google_sub TEXT UNIQUE,
+                email TEXT,
+                name TEXT,
+                picture TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
                 id TEXT PRIMARY KEY,
                 title TEXT,
+                user_id INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                is_archived INTEGER DEFAULT 0
+                is_archived INTEGER DEFAULT 0,
+                FOREIGN KEY(user_id) REFERENCES users(id)
             )
         """)
         
         # Migration: Add is_archived column if it doesn't exist
         try:
             conn.execute("ALTER TABLE conversations ADD COLUMN is_archived INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass # Column likely exists
+
+        # Migration: Add user_id column if it doesn't exist
+        try:
+            conn.execute("ALTER TABLE conversations ADD COLUMN user_id INTEGER REFERENCES users(id)")
         except sqlite3.OperationalError:
             pass # Column likely exists
 
@@ -260,6 +298,7 @@ def init_db():
             if first_msg:
                 title = first_msg[0][:30] + "..." if len(first_msg[0]) > 30 else first_msg[0]
             
+            # For orphaned chats, we leave user_id as NULL (or assign to default if desired later)
             conn.execute("INSERT INTO conversations (id, title) VALUES (?, ?)", (session_id, title))
         
         print("Database initialized with WAL mode enabled")
@@ -267,14 +306,30 @@ def init_db():
 # Initialize DB on startup
 init_db()
 
-def get_conversations(limit: int = 50, include_archived: bool = False):
+def get_conversations(user_id: Optional[int] = None, limit: int = 50, include_archived: bool = False):
     """Get conversations, optionally filtering out archived ones."""
     with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
         conn.row_factory = sqlite3.Row
-        if include_archived:
-            cursor = conn.execute("SELECT * FROM conversations ORDER BY updated_at DESC LIMIT ?", (limit,))
+        
+        query = "SELECT * FROM conversations WHERE 1=1"
+        params = []
+        
+        # User segregation: 
+        # If user_id is provided, show their chats.
+        # If user_id is None (anonymous), show chats with user_id IS NULL (orphaned/anonymous).
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
         else:
-            cursor = conn.execute("SELECT * FROM conversations WHERE is_archived = 0 ORDER BY updated_at DESC LIMIT ?", (limit,))
+             query += " AND user_id IS NULL"
+
+        if not include_archived:
+            query += " AND is_archived = 0"
+            
+        query += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
+        
+        cursor = conn.execute(query, tuple(params))
         return [dict(row) for row in cursor.fetchall()]
 
 def delete_chat_files(session_id: str):
@@ -419,18 +474,23 @@ def get_history(session_id: str) -> List[Dict[str, str]]:
     return history
 
 @retry_on_db_lock()
-def save_message(session_id: str, role: str, content: str, image_path: Optional[str] = None, mime_type: Optional[str] = None, gemini_uri: Optional[str] = None):
+def save_message(session_id: str, role: str, content: str, image_path: Optional[str] = None, mime_type: Optional[str] = None, gemini_uri: Optional[str] = None, user_id: Optional[int] = None):
     with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
         # Ensure conversation exists
-        cursor = conn.execute("SELECT id FROM conversations WHERE id = ?", (session_id,))
-        if not cursor.fetchone():
+        cursor = conn.execute("SELECT id, user_id FROM conversations WHERE id = ?", (session_id,))
+        row = cursor.fetchone()
+        
+        if not row:
             title = "New Chat"
             if role == "user":
                 title = content[:30] + "..." if len(content) > 30 else content
-            conn.execute("INSERT INTO conversations (id, title) VALUES (?, ?)", (session_id, title))
+            conn.execute("INSERT INTO conversations (id, title, user_id) VALUES (?, ?, ?)", (session_id, title, user_id))
         elif role == "user":
              # Update updated_at
              conn.execute("UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
+             
+             # Check if we need to associate an anonymous chat with the logged-in user (optional auto-claim?) 
+             # For now, we respect the existing link.
              
              # Update title if it's still generic
              cursor = conn.execute("SELECT title FROM conversations WHERE id = ?", (session_id,))
@@ -451,7 +511,19 @@ def save_message(session_id: str, role: str, content: str, image_path: Optional[
 async def get_home(request: Request, response: Response):
     """
     On first load, check for a cookie. If missing, generate one.
+    Also check for user session.
     """
+    # Check for logged in user
+    user_info = request.session.get('user')
+    current_user_id = None
+    if user_info:
+        # Look up user_id
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+             cursor = conn.execute("SELECT id FROM users WHERE google_sub = ?", (user_info.get('sub'),))
+             row = cursor.fetchone()
+             if row:
+                 current_user_id = row[0]
+
     # Check if user already has a session cookie
     session_id = request.cookies.get("session_id")
     
@@ -562,8 +634,8 @@ async def get_home(request: Request, response: Response):
             else:
                 chat_history_html += render_bot_message(content)
 
-    # Fetch previous conversations
-    conversations = get_conversations()
+    # Fetch previous conversations for the Current User (or anonymous)
+    conversations = get_conversations(user_id=current_user_id)
 
     # Get current chat title
     current_chat_title = "New Chat"
@@ -578,7 +650,8 @@ async def get_home(request: Request, response: Response):
         "chat_history": chat_history_html,
         "conversations": conversations,
         "current_session_id": session_id,
-        "current_chat_title": current_chat_title
+        "current_chat_title": current_chat_title,
+        "user": user_info # Pass user info to template
     })
     
     # Set cookie if it was missing
@@ -606,9 +679,60 @@ async def load_chat(session_id: str, response: Response):
 
 # --- 4. Helper Functions for Rendering ---
 
-def render_sidebar_html(current_session_id: str) -> str:
+@app.get("/login")
+async def login(request: Request):
+    """Redirects to Google for authentication."""
+    redirect_uri = request.url_for('auth')
+    # Force http if needed (sometimes starlette detects https behind proxy)
+    # redirect_uri = str(redirect_uri).replace("https://", "http://") 
+    return await oauth.google.authorize_redirect(request, redirect_uri)
+
+@app.get("/auth")
+async def auth(request: Request):
+    """Callback for Google OAuth."""
+    try:
+        token = await oauth.google.authorize_access_token(request)
+    except Exception as e:
+        # Handle error (e.g. invalid grant)
+        return HTMLResponse(f"Auth Error: {e}<br><a href='/'>Go Home</a>")
+        
+    user_info = token.get('userinfo')
+    if user_info:
+        request.session['user'] = dict(user_info)
+        
+        # Sync user to DB
+        sub = user_info.get('sub')
+        email = user_info.get('email')
+        name = user_info.get('name')
+        picture = user_info.get('picture')
+        
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            cursor = conn.execute("SELECT id FROM users WHERE google_sub = ?", (sub,))
+            row = cursor.fetchone()
+            if not row:
+                conn.execute(
+                    "INSERT INTO users (google_sub, email, name, picture) VALUES (?, ?, ?, ?)",
+                    (sub, email, name, picture)
+                )
+                print(f"Created new user: {email}")
+            else:
+                # Update info
+                conn.execute(
+                    "UPDATE users SET email = ?, name = ?, picture = ? WHERE google_sub = ?",
+                    (email, name, picture, sub)
+                )
+    
+    return RedirectResponse(url='/')
+
+@app.get("/logout")
+async def logout(request: Request):
+    """Logs out the user."""
+    request.session.pop('user', None)
+    return RedirectResponse(url='/')
+
+def render_sidebar_html(current_session_id: str, user_id: Optional[int] = None) -> str:
     """Renders the sidebar chat list HTML."""
-    conversations = get_conversations()
+    conversations = get_conversations(user_id=user_id)
     sidebar_html = ""
     for chat in conversations:
         is_current = "bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 font-medium" if chat['id'] == current_session_id else "text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800"
@@ -708,7 +832,16 @@ async def archive_chat(session_id: str, request: Request):
             response.headers["HX-Redirect"] = "/" # Full page reload to clean state
             return response
 
-        sidebar_html = render_sidebar_html(current_session_id)
+        # Resolve user_id for sidebar
+        user_info = request.session.get('user')
+        current_user_id = None
+        if user_info:
+             with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                 cursor = conn.execute("SELECT id FROM users WHERE google_sub = ?", (user_info.get('sub'),))
+                 row = cursor.fetchone()
+                 if row: current_user_id = row[0]
+
+        sidebar_html = render_sidebar_html(current_session_id, user_id=current_user_id)
         archived_html = render_archived_list_html()
         
         return HTMLResponse(
@@ -727,7 +860,17 @@ async def unarchive_chat(session_id: str, request: Request):
             conn.commit()
             
         current_session_id = request.cookies.get("session_id")
-        sidebar_html = render_sidebar_html(current_session_id)
+        
+        # Resolve user_id for sidebar
+        user_info = request.session.get('user')
+        current_user_id = None
+        if user_info:
+             with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                 cursor = conn.execute("SELECT id FROM users WHERE google_sub = ?", (user_info.get('sub'),))
+                 row = cursor.fetchone()
+                 if row: current_user_id = row[0]
+                 
+        sidebar_html = render_sidebar_html(current_session_id, user_id=current_user_id)
         archived_html = render_archived_list_html()
         
         return HTMLResponse(
@@ -755,7 +898,16 @@ async def delete_chat_route(session_id: str, request: Request):
             return response
             
         # Otherwise just update components
-        sidebar_html = render_sidebar_html(current_session_id)
+        # Resolve user_id for sidebar
+        user_info = request.session.get('user')
+        current_user_id = None
+        if user_info:
+             with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                 cursor = conn.execute("SELECT id FROM users WHERE google_sub = ?", (user_info.get('sub'),))
+                 row = cursor.fetchone()
+                 if row: current_user_id = row[0]
+
+        sidebar_html = render_sidebar_html(current_session_id, user_id=current_user_id)
         archived_html = render_archived_list_html()
         
         return HTMLResponse(
@@ -2218,9 +2370,19 @@ async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile 
         image_path = f"/{filepath}" # Web path
         mime_type = file.content_type
     
+    # Resolve user_id if logged in
+    user_info = request.session.get('user')
+    user_id = None
+    if user_info:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+             cursor = conn.execute("SELECT id FROM users WHERE google_sub = ?", (user_info.get('sub'),))
+             row = cursor.fetchone()
+             if row:
+                 user_id = row[0]
+
     # Save User Message
     if session_id:
-        save_message(session_id, "user", prompt, image_path, mime_type)
+        save_message(session_id, "user", prompt, image_path, mime_type, user_id=user_id)
 
     stream_id = f"msg-{uuid.uuid4()}"
     
