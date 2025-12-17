@@ -1437,8 +1437,9 @@ def delete_chat_tool(session_id: str = None):
 def execute_calculation(code: str, file_path: str = None, custom_package: str = None, timeout: int = None): 
     """
     Executes Python code for calculations, logic, and text processing.
-    Use this for math, data analysis, or string manipulation.
+    Use this for math, data analysis, or data and string manipulation.
     Also takes a file path to upload to the execution environment.
+    It is okay if the code creates output files in the execution environment. The files will be moved to an accessible location after the code is executed.
     Args:
         code (str): The Python code to execute.
         file_path (str): Optional file path to upload to the execution environment.
@@ -1501,9 +1502,89 @@ def execute_calculation(code: str, file_path: str = None, custom_package: str = 
                 if execution.logs.stderr:
                     output += "\nStdErr: " + "\n".join(execution.logs.stderr)
                 
-                if not output:
+                # --- Introspection: Check for generated files ---
+                # We run a script to list all files in the current directory
+                # excluding hidden files, the uploaded file (if any), and common system files.
+                excluded_files = [os.path.basename(file_path)] if file_path else []
+                excluded_json = json.dumps(excluded_files)
+                
+                introspect_code = f"""
+import os
+import json
+
+excluded = {excluded_json}
+# Common system/env files to ignore
+ignore_list = ['.', '..', '.bashrc', '.profile', '.bash_logout', '.local', '.cache', '.config', '.ipython', '.jupyter', '.npm', '.wget-hsts']
+
+found_files = []
+for f in os.listdir('.'):
+    if f not in excluded and f not in ignore_list and not f.startswith('.'):
+        if os.path.isfile(f):
+            found_files.append(f)
+
+print("FILES_JSON:" + json.dumps(found_files))
+"""
+                introspect_exec = sandbox.run_code(introspect_code, timeout=30)
+                
+                generated_files_links = []
+                
+                if introspect_exec.logs.stdout:
+                    combined_out = "\n".join(introspect_exec.logs.stdout)
+                    import re
+                    match = re.search(r"FILES_JSON:(.*)", combined_out)
+                    if match:
+                        try:
+                            file_list = json.loads(match.group(1))
+                            if file_list:
+                                print(f"Sandbox generated files: {file_list}")
+                                
+                                # Ensure generated directory exists
+                                os.makedirs(GENERATED_DIR, exist_ok=True)
+                                
+                                # Download each file
+                                for remote_filename in file_list:
+                                    try:
+                                        # Sanitize remote filename for local storage
+                                        # Use uuid to prevent collisions
+                                        ext = os.path.splitext(remote_filename)[1]
+                                        local_filename = f"calc_{uuid.uuid4()}{ext}"
+                                        dest_path = os.path.join(GENERATED_DIR, local_filename)
+                                        
+                                        # Download
+                                        file_bytes = sandbox.files.read(remote_filename, format="bytes")
+                                        with open(dest_path, "wb") as f:
+                                            f.write(file_bytes)
+                                            
+                                        web_path = f"/static/generated/{local_filename}"
+                                        
+                                        # Log to DB
+                                        session_id = session_id_ctx.get()
+                                        if session_id:
+                                            try:
+                                                with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                                                    conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, dest_path))
+                                            except Exception as db_e:
+                                                    print(f"Error saving generated file to DB: {db_e}")
+
+                                        # Add to links
+                                        generated_files_links.append(f"[{remote_filename}]({web_path})")
+                                        
+                                    except Exception as dl_e:
+                                        print(f"Error downloading file {remote_filename}: {dl_e}")
+                                        output += f"\nWarning: Could not download generated file {remote_filename}."
+                        except json.JSONDecodeError:
+                            print("Failed to parse introspection JSON")
+
+                if not output and not generated_files_links:
                     return "Code executed successfully in Sandbox (no output)."
-                return output.strip()
+                
+                result = output.strip()
+                if generated_files_links:
+                    result += "\n\n### Generated Files:\n"
+                    for link in generated_files_links:
+                        result += f"- {link}\n"
+                
+                return result
         except Exception as e:
             return f"Error executing code in E2B Sandbox: {str(e)}"
 
@@ -2670,41 +2751,42 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 default_timeout = int(get_setting("e2b_timeout", "300"))
                 tools.append(execute_calculation)
                 current_instruction += """\n\n- You have access to an 'execute_calculation' tool. 
-                Use it for math, logic, text processing, or data analysis (numpy/pandas) or any arbitray python code executions. 
-                If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
-                you can provide execute_calculation tool with the name of module/package to install and import.
-                You can also provide a timeout in seconds to the execute_calculation tool ONLY if you expect the code to take longer than the default timeout of {default_timeout} seconds.
-                It returns TEXT output. It CANNOT generate images. DO NOT provide Python code to the user - ALWAYS call the tool."""
+                - Use it for math, logic, text processing, or data analysis (numpy/pandas) or any arbitray python code executions. 
+                - It's fine for the code to generate output file(s). If the code creates output files in the execution environment, the files will be moved to an accessible location after the code is executed.
+                - If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
+                - you can provide execute_calculation tool with the name of module/package to install and import.
+                - You can also provide a timeout in seconds to the execute_calculation tool ONLY if you expect the code to take longer than the default timeout of {default_timeout} seconds.
+                -It returns TEXT output. It CANNOT generate images. DO NOT provide Python code to the user - ALWAYS call the tool."""
 
                 tools.append(generate_chart)
                 current_instruction += """\n\n- You have access to a 'generate_chart' tool using matplotlib. 
-                Use this for standard charts (bar, line, pie, scatter, histograms). 
-                If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
-                you can provide generate_chart tool with the name of module/package to install and import.
-                You can also provide a timeout in seconds to the generate_chart tool ONLY if you expect the code to take longer than the default timeout of {default_timeout} seconds.
-                It returns JSON containing the path to the generated chart (image file) (if successful). 
-                DO NOT provide Python code to the user - ALWAYS call the tool."""
+                - Use this for standard charts (bar, line, pie, scatter, histograms). 
+                - If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
+                - you can provide generate_chart tool with the name of module/package to install and import.
+                - You can also provide a timeout in seconds to the generate_chart tool ONLY if you expect the code to take longer than the default timeout of {default_timeout} seconds.
+                - It returns JSON containing the path to the generated chart (image file) (if successful). 
+                - DO NOT provide Python code to the user - ALWAYS call the tool."""
                 
                 tools.append(generate_plotly_chart)
                 current_instruction += """\n\n- You have access to a 'generate_plotly_chart' tool using Plotly. 
-                Use this for ADVANCED visualizations: 3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps. 
-                If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
-                you can provide generate_plotly_chart tool with the name of module/package to install and import.
-                You can also provide a timeout in seconds to the generate_plotly_chart tool ONLY if you expect the code to take longer than the default timeout of {default_timeout} seconds.
-                It returns JSON containing the path to the generated chart (image file) and/or the generated html file (if successful). 
-                DO NOT provide Python code to the user - ALWAYS call the tool. Use this when matplotlib's generate_chart cannot handle the request."""
+                - Use this for ADVANCED visualizations: 3D plots, interactive charts, sunburst/treemap, Sankey diagrams, animated charts, geographic maps. 
+                - If a file is needed to be processed by the code, the code must refer to only the filename (not the full path). 
+                - you can provide generate_plotly_chart tool with the name of module/package to install and import.
+                - You can also provide a timeout in seconds to the generate_plotly_chart tool ONLY if you expect the code to take longer than the default timeout of {default_timeout} seconds.
+                - It returns JSON containing the path to the generated chart (image file) and/or the generated html file (if successful). 
+                - DO NOT provide Python code to the user - ALWAYS call the tool. Use this when matplotlib's generate_chart cannot handle the request."""
 
                 tools.append(wolfram_alpha_query)
                 current_instruction += """\n\n- You have access to a 'wolfram_alpha_query' tool. 
-                Use it for complex math, scientific data, unit conversions, and factual queries that might not be in your knowledge base.
-                When the tool returns images or links to images contemplate using these in your final response.
-                GUIDELINES:
-                Convert inputs to simplified keyword queries (e.g. "France population" instead of "how many people live in France").
-                Send queries in English only.
-                Use proper Markdown for math formulas: '$$...$$' for block, '\\(...\\)' for inline.
-                Use named physical constants (e.g., 'speed of light') without numerical substitution.
-                Include a space between compound units (e.g., "m Ω" instead of "mΩ").
-                If data for multiple properties is needed, make separate calls for each property.
+                - Use it for complex math, scientific data, unit conversions, and factual queries that might not be in your knowledge base.
+                - When the tool returns images or links to images contemplate using these in your final response.
+                - GUIDELINES:
+                - Convert inputs to simplified keyword queries (e.g. "France population" instead of "how many people live in France").
+                - Send queries in English only.
+                - Use proper Markdown for math formulas: '$$...$$' for block, '\\(...\\)' for inline.
+                - Use named physical constants (e.g., 'speed of light') without numerical substitution.
+                - Include a space between compound units (e.g., "m Ω" instead of "mΩ").
+                - If data for multiple properties is needed, make separate calls for each property.
                 """
 
                 #tools.append(generate_image)
@@ -2714,16 +2796,16 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
 
                 tools.append(get_current_datetime)
                 current_instruction +="""\n\n- You have access to a 'get_current_datetime' tool. 
-                Use it when asked about the current time or date. It automatically detects the user's timezone from their IP. 
-                You can also pass a 'timezone' argument (e.g., 'Asia/Tokyo') if the user explicitly requests a specific timezone."""
+                - Use it when asked about the current time or date. It automatically detects the user's timezone from their IP. 
+                - You can also pass a 'timezone' argument (e.g., 'Asia/Tokyo') if the user explicitly requests a specific timezone."""
 
                 tools.append(get_user_timezone)
                 current_instruction += """\n\n- You have access to a 'get_user_timezone' tool. 
-                Use it when the user asks 'What is my timezone?' or wants to know the timezone detected from their IP."""
+                - Use it when the user asks 'What is my timezone?' or wants to know the timezone detected from their IP."""
 
                 tools.append(get_coordinates)
                 current_instruction += """\n\n- You have access to a 'get_coordinates' tool. 
-                Use it to find the latitude and longitude of locations."""
+                - Use it to find the latitude and longitude of locations."""
 
                 tools.append(get_weather)
                 current_instruction += """\n\n- You have access to a 'get_weather' tool. 
@@ -2731,11 +2813,11 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
 
                 tools.append(get_forecast_weather)
                 current_instruction += """\n\n- You have access to a 'get_forecast_weather' tool. 
-                Use it for multi-day weather forecasts, planning, event scheduling, or when the user asks about future weather."""
+                - Use it for multi-day weather forecasts, planning, event scheduling, or when the user asks about future weather."""
 
                 tools.append(get_precipitation_timing)
                 current_instruction += """\n\n- You have access to a 'get_precipitation_timing' tool. 
-                Use it when the user asks 'when will it rain?', 'when will it stop raining?', or needs precipitation timing information."""
+                - Use it when the user asks 'when will it rain?', 'when will it stop raining?', or needs precipitation timing information."""
             else:
                 # When files are present, clear history to avoid API compatibility issues
                 # Keep only the current message (last one in payload)
@@ -2746,16 +2828,16 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 
                 current_instruction += "\n\nNote: Tool calling is disabled because you are analyzing an uploaded file. Focus on the file content."
             
-            current_instruction += """\n\n- if you have actionable follow-up suggestions, 
+            current_instruction += """\n\nif you have actionable follow-up suggestions, 
             append them to the very end of your response as a JSON object with the key 'suggestions', 
-            DO NOT wrap this JSON object in markdown code blocks. Doing so will is a FAILURE.
-            like this: {"suggestions": ["Action 1", "Action 2"]}. 
-            Formulate the suggestions in a way that the user can directly execute them, not as a question to the user, such as "would you like to...".
-            Make sure it is the very last thing in your response.
+            -DO NOT wrap this JSON object in markdown code blocks. Doing so will is a FAILURE.
+            -like this: {"suggestions": ["Action 1", "Action 2"]}. 
+            -Formulate the suggestions in a way that the user can directly execute them, not as a question to the user, such as "would you like to...".
+            -Make sure it is the very last thing in your response.
             
             File Handling Distinction:
             - Use write_source_code when you need to save a file for the user to download (reports, code files). These are persistent.
-            - Use execute_calculation file uploads for temporary data processing. These files are deleted after execution.
+            - Use execute_calculation file uploads for temporary data processing. Any file that is created will be available for download by the user. 
             
             Here are the rules for our entire conversation:
             - In a request that requires multiple steps, after completing all the steps for a request, you must provide a single, comprehensive summary of all information gathered and actions taken. 
