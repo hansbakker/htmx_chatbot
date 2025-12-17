@@ -523,10 +523,19 @@ async def get_home(request: Request, response: Response):
              row = cursor.fetchone()
              if row:
                  current_user_id = row[0]
+    else:
+        # Mandatory Login: Redirect to login page if not authenticated
+        return RedirectResponse(url='/login')
 
     # Check if user already has a session cookie
     session_id = request.cookies.get("session_id")
     
+    # Ownership Check: Ensure the cookie session belongs to the logged-in user
+    if session_id and current_user_id:
+        if not verify_chat_ownership(session_id, current_user_id):
+            # Session exists but belongs to someone else (or no one). Start fresh.
+            session_id = None
+
     if not session_id:
         session_id = str(uuid.uuid4())
         
@@ -660,9 +669,41 @@ async def get_home(request: Request, response: Response):
         
     return response
 
+# --- Authentication & Authorization Dependencies ---
+def get_current_user_id(request: Request):
+    user_info = request.session.get('user')
+    if not user_info:
+        # Check if it's an HTMX request
+        if request.headers.get("HX-Request"):
+            response = Response()
+            response.headers["HX-Redirect"] = "/login"
+            return response
+        raise HTTPException(status_code=302, headers={"Location": "/login"})
+    
+    # Resolve user_id
+    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+         cursor = conn.execute("SELECT id FROM users WHERE google_sub = ?", (user_info.get('sub'),))
+         row = cursor.fetchone()
+         if row:
+             return row[0]
+    return None
+
+def verify_chat_ownership(session_id: str, user_id: int):
+    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+        cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+        row = cursor.fetchone()
+        if not row:
+            return False # Chat doesn't exist (or is new/ unsaved)
+        if row[0] != user_id:
+            return False
+    return True
+
 @app.post("/new-chat")
-async def new_chat(response: Response):
+async def new_chat(request: Request, user_id: int = Depends(get_current_user_id)):
     """Creates a new chat session."""
+    # If user_id is a redirect response, return it
+    if isinstance(user_id, Response): return user_id
+    
     new_session_id = str(uuid.uuid4())
     response = Response()
     response.set_cookie(key="session_id", value=new_session_id, max_age=31536000)
@@ -670,8 +711,17 @@ async def new_chat(response: Response):
     return response
 
 @app.get("/load-chat/{session_id}")
-async def load_chat(session_id: str, response: Response):
+async def load_chat(session_id: str, request: Request, user_id: int = Depends(get_current_user_id)):
     """Loads a specific chat session."""
+    if isinstance(user_id, Response): return user_id
+
+    # Enforce Ownership
+    if not verify_chat_ownership(session_id, user_id):
+         # If not owned, redirect to home (which will likely start a new chat or show error)
+         response = Response()
+         response.headers["HX-Redirect"] = "/"
+         return response
+
     response = Response()
     response.set_cookie(key="session_id", value=session_id, max_age=31536000)
     response.headers["HX-Redirect"] = "/" # Redirect to home to reload everything
@@ -803,8 +853,12 @@ def render_archived_list_html() -> str:
 # --- Routes ---
 
 @app.post("/rename-chat/{session_id}")
-async def rename_chat(session_id: str, new_title: str = Form(...)):
+async def rename_chat(session_id: str, new_title: str = Form(...), user_id: int = Depends(get_current_user_id)):
     """Rename a chat conversation."""
+    if isinstance(user_id, Response): return user_id
+    if not verify_chat_ownership(session_id, user_id):
+        return HTMLResponse("<div>Error: Unauthorized</div>", status_code=403)
+
     try:
         with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
             conn.execute("UPDATE conversations SET title = ? WHERE id = ?", (new_title, session_id))
@@ -814,8 +868,12 @@ async def rename_chat(session_id: str, new_title: str = Form(...)):
         return HTMLResponse(f"<div>Error: {str(e)}</div>", status_code=500)
 
 @app.post("/archive-chat/{session_id}")
-async def archive_chat(session_id: str, request: Request):
+async def archive_chat(session_id: str, request: Request, user_id: int = Depends(get_current_user_id)):
     """Archive a chat conversation."""
+    if isinstance(user_id, Response): return user_id
+    if not verify_chat_ownership(session_id, user_id):
+        return HTMLResponse("<div>Error: Unauthorized</div>", status_code=403)
+
     try:
         with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
             conn.execute("UPDATE conversations SET is_archived = 1 WHERE id = ?", (session_id,))
@@ -852,8 +910,12 @@ async def archive_chat(session_id: str, request: Request):
         return HTMLResponse(f"<div>Error: {str(e)}</div>", status_code=500)
 
 @app.post("/unarchive-chat/{session_id}")
-async def unarchive_chat(session_id: str, request: Request):
+async def unarchive_chat(session_id: str, request: Request, user_id: int = Depends(get_current_user_id)):
     """Unarchive a chat conversation."""
+    if isinstance(user_id, Response): return user_id
+    if not verify_chat_ownership(session_id, user_id):
+        return HTMLResponse("<div>Error: Unauthorized</div>", status_code=403)
+
     try:
         with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
             conn.execute("UPDATE conversations SET is_archived = 0 WHERE id = ?", (session_id,))
@@ -881,8 +943,12 @@ async def unarchive_chat(session_id: str, request: Request):
         return HTMLResponse(f"<div>Error: {str(e)}</div>", status_code=500)
 
 @app.delete("/delete-chat/{session_id}")
-async def delete_chat_route(session_id: str, request: Request):
+async def delete_chat_route(session_id: str, request: Request, user_id: int = Depends(get_current_user_id)):
     """Permanently delete a chat conversation and all associated files."""
+    if isinstance(user_id, Response): return user_id
+    if not verify_chat_ownership(session_id, user_id):
+        return HTMLResponse("<div>Error: Unauthorized</div>", status_code=403)
+
     try:
         delete_chat_files(session_id)
         
@@ -2353,7 +2419,8 @@ async def get_home(request: Request, response: Response):
         
 
 @app.post("/chat", response_class=HTMLResponse)
-async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile = File(None)):
+async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile = File(None), user_id: int = Depends(get_current_user_id)):
+    if isinstance(user_id, Response): return user_id
     
     session_id = request.cookies.get("session_id")
     image_path = None
@@ -2370,16 +2437,6 @@ async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile 
         image_path = f"/{filepath}" # Web path
         mime_type = file.content_type
     
-    # Resolve user_id if logged in
-    user_info = request.session.get('user')
-    user_id = None
-    if user_info:
-        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
-             cursor = conn.execute("SELECT id FROM users WHERE google_sub = ?", (user_info.get('sub'),))
-             row = cursor.fetchone()
-             if row:
-                 user_id = row[0]
-
     # Save User Message
     if session_id:
         save_message(session_id, "user", prompt, image_path, mime_type, user_id=user_id)

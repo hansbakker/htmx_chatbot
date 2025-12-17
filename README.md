@@ -6,6 +6,10 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 
 ## Features
 
+*   **Multi-User Support (Google SSO):**
+    *   **Secure Authentication:** Integrated Google OAuth 2.0 login.
+    *   **Data Segregation:** Each user has their own isolated list of conversations.
+    *   **Persistent Sessions:** Secure server-side sessions manage user state.
 *   **Zero-Build Frontend:** No Webpack, no node_modules, no hydration. Uses Tailwind CSS via CDN.
 *   **Real-Time Streaming:** Uses SSE to push LLM tokens to the browser instantly.
 *   **Modern UI:** Clean, responsive interface with distinct user/bot message styling and animations.
@@ -57,6 +61,10 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 *   A [Gemini API Key](https://aistudio.google.com/) (if using Gemini).
 *   An [OpenAI API Key](https://platform.openai.com/) (if using OpenAI).
 *   A [Tavily API Key](https://tavily.com/) for web search.
+*   **Google Cloud Console Project:** Required for Google SSO.
+    *   Create a project and enable **Google People API**.
+    *   Create OAuth 2.0 Credentials (Client ID & Secret).
+    *   Set **Authorized Redirect URIs** to match your deployment (e.g., `http://localhost:8000/auth` or your `sslip.io` URL).
 *   **System Dependencies (macOS):** `cairo` and `pango` (required for PDF generation).
     ```bash
     brew install cairo pango
@@ -82,7 +90,7 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
     Create a `requirements.txt` file (or run directly):
 
     ```bash
-    pip install fastapi uvicorn jinja2 python-dotenv google-generativeai openai markdown pillow python-multipart tavily-python geopy matplotlib numpy pandas requests plotly kaleido
+    pip install fastapi uvicorn jinja2 python-dotenv google-generativeai openai markdown pillow python-multipart tavily-python geopy matplotlib numpy pandas requests plotly kaleido authlib itsdangerous
     ```
 
 4.  **Configure Environment:**
@@ -97,6 +105,12 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
     # Required for Web Search
     TAVILY_API_KEY=your_tavily_api_key_here
     
+    # Required for Google SSO
+    GOOGLE_CLIENT_ID=your_google_client_id
+    GOOGLE_CLIENT_SECRET=your_google_client_secret
+    SECRET_KEY=your_random_secret_key
+    # OAUTHLIB_INSECURE_TRANSPORT=1 # Uncomment for local dev (HTTP)
+
     # Optional: Weather Tools (XWeather)
     XWEATHER_MCP_ID=your_xweather_client_id_here
     XWEATHER_MCP_SECRET=your_xweather_client_secret_here
@@ -143,7 +157,8 @@ Start the development server with hot-reloading:
 uvicorn main:app --reload
 ```
 
-*   **Access the UI:** Open `http://127.0.0.1:8000` in your browser.
+*   **Access the UI:** Open `http://127.0.0.1:8000` (or your configured `sslip.io` URL for Google Auth).
+*   **Login:** Click "Sign in with Google" to access your personal chat history.
 *   **Dark Mode:** Click the moon/sun icon in the header to toggle between light and dark themes.
 *   **Chat History:** View all your previous conversations in the left sidebar. Click any chat to load it.
 *   **Manage Chats:** Hover over a chat in the sidebar and click the three-dot menu (⋮) to **Rename**, **Archive**, or **Delete** it.
@@ -168,12 +183,13 @@ uvicorn main:app --reload
 1.  **Initialization:**
     *   Client loads `index.html`.
     *   Server assigns a `session_id` cookie if missing.
+    *   **Authentication:** Checks for secure session cookie. If logged in, loads user-specific chats. If not, loads generic/anonymous chats (or shows empty state).
     *   Server loads chat history from `chat.db`.
     *   **Provider Factory:** Server initializes the configured LLM provider (Gemini or OpenAI) based on `LLM_PROVIDER` env var via `providers.factory.get_llm_provider`.
 
 2.  **User Submission:**
     *   HTMX sends a `POST /chat` (multipart/form-data for files).
-    *   Server saves user message to DB.
+    *   Server saves user message to DB (associated with `user_id` if logged in).
     *   Server returns HTML immediately containing the User Message and a **Bot Placeholder** (`<div sse-connect="...">`)`.
 
 3.  **Streaming (SSE) & Tools:**
@@ -209,6 +225,9 @@ The chatbot has access to the following tools:
 
 ## Troubleshooting
 
+*   **Google Login Errors:**
+    *   **Redirect URI Mismatch:** Ensure the URL in your browser matches the Authorized Redirect URI in Google Cloud Console exactly.
+    *   **Insecure Transport:** Google blocks HTTP by default. For local dev, ensure `OAUTHLIB_INSECURE_TRANSPORT=1` is in your `.env`.
 *   **Timezone Detection on Localhost:** When running locally (`127.0.0.1`), the IP detection will see a local IP (e.g., `127.0.0.1`) which cannot be geolocated. In this case, the system defaults to `UTC`. To test timezone detection, you can manually set the `X-Forwarded-For` header or deploy to a public server.
 *   **XWeather API Errors:** If you see "invalid location" errors, try specifying the location more precisely (e.g., "City, Country" or Zip Code). Ensure `XWEATHER_MCP_ID` and `XWEATHER_MCP_SECRET` are set in `.env`.
 *   **File Upload Fails:** Ensure `static/uploads/` directory exists (created automatically).
