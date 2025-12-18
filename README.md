@@ -6,231 +6,133 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 
 ## Features
 
-*   **Multi-User Support (Google SSO):**
-    *   **Secure Authentication:** Integrated Google OAuth 2.0 login.
-    *   **Data Segregation:** Each user has their own isolated list of conversations.
-    *   **Persistent Sessions:** Secure server-side sessions manage user state.
-*   **Zero-Build Frontend:** No Webpack, no node_modules, no hydration. Uses Tailwind CSS via CDN.
+### Core Capabilities
+*   **Multi-User Support (Google SSO):** Integrated Google OAuth 2.0 login with secure data segregation and persistent sessions.
 *   **Real-Time Streaming:** Uses SSE to push LLM tokens to the browser instantly.
-*   **Modern UI:** Clean, responsive interface with distinct user/bot message styling and animations.
-*   **Dark Mode:** Toggle between light and dark themes with persistent preference storage.
-*   **Chat History & Sidebar:**
-    *   Sidebar navigation showing all previous conversations, accessible on mobile via a responsive drawer overlay.
-    *   **Context Menu:** Rename, Archive, or Delete chats directly from the sidebar.
-    *   Auto-saved chat sessions with smart naming based on first message.
-    *   Easy switching between conversations.
-    *   "New Chat" button to start fresh conversations.
-    *   **Archived Chats:** View and manage archived conversations via the Settings panel.
-*   **Smart Scroll Behavior:** Intelligently positions user queries at the top while showing as much of the response as possible.
-*   **System Instructions:** Configure the AI's persona (e.g., "You are a pirate") via a built-in settings panel. Persists across sessions.
-*   **Model Selection:** Choose from multiple Gemini models (Flash, Pro, Flash Thinking) via the settings panel.
-*   **Persistent Chat History:** Uses SQLite (`chat.db`) to save conversations, allowing history to survive server restarts.
-*   **Multimodal Support:**
-    *   **File Input:** Upload any file type (PDFs, CSVs, text files, images, etc.) to analyze and ask questions about them.
-    *   **Image Generation:** Generate artistic images using Pollinations.ai via the `generate_image` tool.
-    *   **Chart/Graph Generation:** Create data visualizations (bar charts, line graphs, scatter plots, etc.) using matplotlib via the `generate_chart` tool.
-    *   **PDF Generation:** Convert Markdown content to downloadable PDF files via the `convert_md_to_pdf` tool (uses `xhtml2pdf`).
-*   **File Context Management:** 
-    *   When analyzing files, conversation history is temporarily cleared to ensure API compatibility.
-    *   Use the "Clear File Context" button to restore tools and conversation history after file analysis.
-*   **Intelligent Tools:**
-    *   **Web Search:** Integrated with **Tavily API** for real-time information retrieval.
-    *   **Python Execution:** Separate tools for calculations (`execute_calculation`) and visualizations (`generate_chart`).
-    *   **Weather Services:** Real-time weather data via **XWeather MCP** (current conditions, forecasts, precipitation timing).
-    *   **Timezone Awareness:** Automatically detects user timezone from IP address, with manual override support.
-    *   **Date/Time:** Get current time in user's timezone or any specified timezone.
-    *   **Location Services:** Find coordinates for locations using geopy.
+*   **Modern UI:** A clean, responsive "glassmorphism" interface with dark mode support and smooth animations.
+*   **Chat Management:** Full lifecycle management including Rename, Archive, and Delete conversations.
+*   **Persistent History:** All conversations and settings are stored in a local SQLite database (`chat.db`).
 
-*   **Transparent Tool Execution:**
-    *   **Code Display:** View the actual Python code executed for calculations and charts in a collapsible block.
-    *   **Sources Display:** View a list of web sources used for search queries with clickable links.
-*   **Actionable Follow-up Suggestions:**
-    *   The AI automatically provides relevant follow-up questions or actions as clickable chips.
-    *   Clicking a suggestion automatically submits it to the chat.
-*   **Robust Error Handling:** Gracefully handles API quota limits, token limits, and empty responses with automatic retries and user notifications.
-*   **Auto-Fix / Auto-Continue:** When the AI indicates it will retry or needs to continue (e.g., "let me try again", "please wait"), the system automatically triggers a follow-up request without requiring user input. Configurable retry phrases in `RETRY_PHRASES` constant.
-*   **Secure Code Sandbox (E2B):**
-    *   **Isolated Execution:** Run Python code (calculations, charts, Plotly) in a secure, cloud-based sandbox via [E2B](https://e2b.dev/).
-    *   **Configurable:** Toggle between Local and Sandbox execution in Settings.
-    *   **Timeout Control:** Adjust the sandbox execution timeout directly from the UI (default: 300s).
-    *   **Supported Tools:** Works seamlessly with `execute_calculation`, `generate_chart`, and `generate_plotly_chart`.
+### Advanced LLM Interaction
+*   **Provider Agnostic:** Supports both **Google Gemini** and **OpenAI** (configurable via environment variables).
+*   **Model Picker:** Switch between different models (e.g., Gemini 1.5 Pro/Flash, GPT-4o) directly from the UI.
+*   **Persona Configuration:** Custom "System Instructions" that persist across sessions.
+*   **Auto-Continue:** Automatically handles multi-step reasoning or long tasks by detecting "thinking" phrases.
+
+### Multimodal & File Support
+*   **Generic File Upload:** Analyze PDFs, CSVs, images, and text files.
+*   **Vision Support:** Direct image/video analysis for supported models.
+*   **File Context Management:** Intelligent history management when analyzing files to optimize token usage and compatibility.
+
+### Intelligent Tooling & Execution
+*   **Secure Code Sandbox (E2B):** Run Python calculations and data visualizations (Matplotlib/Plotly) in a secure, isolated cloud environment.
+*   **Web Intel:** Integrated web search (Tavily) and deep website crawling.
+*   **Developer Tools:** Tools to read, write, and modify the chatbot's own source code or install new Python packages at runtime.
+*   **Utility Tools:** PDF generation, weather data (XWeather), timezone-aware datetime, and location services (Geopy).
 
 ## Prerequisites
 
 *   Python 3.9+
-*   A [Gemini API Key](https://aistudio.google.com/) (if using Gemini).
-*   An [OpenAI API Key](https://platform.openai.com/) (if using OpenAI).
-*   A [Tavily API Key](https://tavily.com/) for web search.
-*   **Google Cloud Console Project:** Required for Google SSO.
-    *   Create a project and enable **Google People API**.
-    *   Create OAuth 2.0 Credentials (Client ID & Secret).
-    *   Set **Authorized Redirect URIs** to match your deployment (e.g., `http://localhost:8000/auth` or your `sslip.io` URL).
-*   **System Dependencies (macOS):** `cairo` and `pango` (required for PDF generation).
-    ```bash
-    brew install cairo pango
-    ```
+*   **API Keys:**
+    *   [Gemini API Key](https://aistudio.google.com/) and/or [OpenAI API Key](https://platform.openai.com/).
+    *   [Tavily API Key](https://tavily.com/) for web search/crawling.
+    *   [E2B API Key](https://e2b.dev/) for secure code execution (recommended).
+*   **Google Cloud Project:** Required for Google SSO (OAuth 2.0 Client ID/Secret).
+*   **System Dependencies (macOS):** `brew install cairo pango` (for PDF generation).
 
 ## Installation
 
-1.  **Clone or create the project directory:**
-
+1.  **Clone the project:**
     ```bash
-    mkdir htmx-chatbot
+    git clone <repository-url>
     cd htmx-chatbot
     ```
 
-2.  **Create a virtual environment:**
-
+2.  **Setup Virtual Environment:**
     ```bash
     python -m venv venv
     source venv/bin/activate  # On Windows: venv\Scripts\activate
     ```
 
-3.  **Install dependencies:**
-    Create a `requirements.txt` file (or run directly):
-
+3.  **Install Dependencies:**
     ```bash
-    pip install fastapi uvicorn jinja2 python-dotenv google-generativeai openai markdown pillow python-multipart tavily-python geopy matplotlib numpy pandas requests plotly kaleido authlib itsdangerous
+    pip install fastapi uvicorn jinja2 python-dotenv google-generativeai openai markdown pillow python-multipart tavily-python geopy matplotlib numpy pandas requests plotly kaleido authlib itsdangerous httpx xhtml2pdf e2b_code_interpreter
+    ```
+    or use the requirements.txt file
+    ```bash
+    pip install -r requirements.txt
     ```
 
-4.  **Configure Environment:**
-    Create a `.env` file in the root directory:
+4.  **Configuration:**
+    Create a `.env` file based on the following template:
     ```ini
-    # Required for Gemini Provider
-    GEMINI_API_KEY=your_gemini_api_key_here
+    # Providers
+    GEMINI_API_KEY=...
+    OPENAI_API_KEY=...
+    LLM_PROVIDER=gemini # or 'openai'
     
-    # Required for OpenAI Provider
-    OPENAI_API_KEY=your_openai_api_key_here
+    # Tools
+    TAVILY_API_KEY=...
+    E2B_API_KEY=...
+    WOLFRAM_ALPHA_APP_ID=...
+    XWEATHER_MCP_ID=...
+    XWEATHER_MCP_SECRET=...
     
-    # Required for Web Search
-    TAVILY_API_KEY=your_tavily_api_key_here
-    
-    # Required for Google SSO
-    GOOGLE_CLIENT_ID=your_google_client_id
-    GOOGLE_CLIENT_SECRET=your_google_client_secret
-    SECRET_KEY=your_random_secret_key
-    # OAUTHLIB_INSECURE_TRANSPORT=1 # Uncomment for local dev (HTTP)
-
-    # Optional: Weather Tools (XWeather)
-    XWEATHER_MCP_ID=your_xweather_client_id_here
-    XWEATHER_MCP_SECRET=your_xweather_client_secret_here
-    
-    # Optional: Wolfram Alpha
-    WOLFRAM_ALPHA_APP_ID=your_wolfram_alpha_app_id_here
-    
-    # SELECT PROVIDER: 'gemini' or 'openai' (defaults to gemini)
-    LLM_PROVIDER=gemini
-
-    # Optional: E2B Sandbox (for secure code execution)
-    E2B_API_KEY=your_e2b_api_key_here
+    # Auth & Security
+    GOOGLE_CLIENT_ID=...
+    GOOGLE_CLIENT_SECRET=...
+    SECRET_KEY=... # Random string for sessions
+    # OAUTHLIB_INSECURE_TRANSPORT=1 # For local HTTP dev
     ```
-    
-    **Note:** You only need the API key for the provider you choose to use.
 
 ## Project Structure
 
 ```text
 .
-├── main.py                 # FastAPI server, session logic, tools, and SSE generator
-├── providers/              # LLM Provider Abstraction Layer
-│   ├── base.py             # Abstract Base Class (LLMProvider)
-│   ├── gemini.py           # Google Gemini Implementation
-│   ├── openai.py           # OpenAI Implementation
-│   ├── utils.py            # Shared utilities (tool conversion)
-│   └── factory.py          # Provider Factory
-├── .env                    # API Key configuration
-├── requirements.txt        # Python dependencies
-├── system_instruction.txt  # Persisted system prompt (persona)
-├── chat.db                 # SQLite database for chat history
-├── .gitignore              # Git ignore file
+├── main.py                 # Core FastAPI application & tool definitions
+├── providers/              # LLM Provider abstraction layer (Gemini, OpenAI)
+├── chat.db                 # SQLite database (History, Settings, Users)
 ├── static/
-│   ├── uploads/            # Directory for uploaded files
-│   └── generated/          # Directory for generated charts/images
-└── templates/
-    └── index.html          # Client UI (HTMX + Tailwind CSS + Highlight.js)
+│   ├── uploads/            # User-uploaded files
+│   ├── generated/          # Generated charts, PDFs, and images
+│   └── generated_code/     # Files written by the 'write_source_code' tool
+├── templates/
+│   └── index.html          # Frontend UI (HTMX + Tailwind)
+└── system_instruction.txt  # Persisted AI persona
 ```
-
-## Running the Application
-
-Start the development server with hot-reloading:
-```bash
-uvicorn main:app --reload
-```
-
-*   **Access the UI:** Open `http://127.0.0.1:8000` (or your configured `sslip.io` URL for Google Auth).
-*   **Login:** Click "Sign in with Google" to access your personal chat history.
-*   **Dark Mode:** Click the moon/sun icon in the header to toggle between light and dark themes.
-*   **Chat History:** View all your previous conversations in the left sidebar. Click any chat to load it.
-*   **Manage Chats:** Hover over a chat in the sidebar and click the three-dot menu (⋮) to **Rename**, **Archive**, or **Delete** it.
-*   **Archived Chats:** Go to Settings > Archived Chats to view, unarchive, or permanently delete hidden conversations.
-*   **New Chat:** Click the "New Chat" button in the sidebar (or header on mobile) to start a fresh conversation.
-*   **Configure Persona:** Click the "Settings" button in the top right to change the AI's system instruction.
-*   **Select Model:** In the settings panel, choose your preferred model.
-    *   *Note: The available models update dynamically based on your configured `LLM_PROVIDER`. If using Gemini, you'll see Gemini models (Flash, Pro). If using OpenAI, you'll see GPT models (GPT-4o, o1-preview).*
-*   **Upload Files:** Click the paperclip icon to upload any file (images, PDFs, CSVs, text files, etc.).
-*   **Analyze Files:** After uploading, ask questions about the file content.
-*   **Clear File Context:** Click the "📎 Clear File Context" button to remove file references and restore tools/history.
-*   **Generate Images:** Ask "Draw a cat wearing a wizard hat" (artistic images via Pollinations.ai).
-*   **Generate Charts:** Ask "Create a bar chart showing Q1=100, Q2=150, Q3=120, Q4=180" (data visualization via matplotlib).
-*   **Search Web:** Ask "What is the price of Bitcoin?".
-*   **Run Calculations:** Ask "Calculate the 100th Fibonacci number".
-*   **Get Weather:** Ask "What's the weather in London?" or "What's the forecast for next week in Paris?".
-*   **Get Time/Date:** Ask "What time is it?" (automatically detects your timezone) or "What time is it in Tokyo?".
-*   **Get Timezone:** Ask "What is my timezone?".
-
-## Architecture Overview
-
-1.  **Initialization:**
-    *   Client loads `index.html`.
-    *   Server assigns a `session_id` cookie if missing.
-    *   **Authentication:** Checks for secure session cookie. If logged in, loads user-specific chats. If not, loads generic/anonymous chats (or shows empty state).
-    *   Server loads chat history from `chat.db`.
-    *   **Provider Factory:** Server initializes the configured LLM provider (Gemini or OpenAI) based on `LLM_PROVIDER` env var via `providers.factory.get_llm_provider`.
-
-2.  **User Submission:**
-    *   HTMX sends a `POST /chat` (multipart/form-data for files).
-    *   Server saves user message to DB (associated with `user_id` if logged in).
-    *   Server returns HTML immediately containing the User Message and a **Bot Placeholder** (`<div sse-connect="...">`)`.
-
-3.  **Streaming (SSE) & Tools:**
-    *   Browser connects to the `/stream` endpoint.
-    *   Server uses the abstract `llm_provider` interface to generate responses.
-    *   **Function Calling:** If the model calls a tool, the server executes it (e.g., generates a chart, searches the web), feeds the result back to the model, and streams the final answer.
-    *   **Timezone Detection:** Client IP is captured and used for automatic timezone detection in datetime queries.
-    *   **Retries:** Automatic retries for empty responses or transient errors.
-    *   **Formatting:** Server converts Markdown to HTML on the fly.
-
-4.  **Completion (OOB Swap):**
-    *   Upon stream completion, the server saves the bot's response to DB.
-    *   Server sends a final `hx-swap-oob="outerHTML"` event to finalize the UI.
 
 ## Available Tools
 
-The chatbot has access to the following tools:
+The AI assistant can autonomously use the following tools:
 
-1.  **`search_web(query)`**: Searches the internet using Tavily API.
-2.  **`crawl_website(url, max_depth, limit, instructions)`**: Crawls a website starting from a URL to extract content from multiple pages. Useful for exploring site structure or gathering information from multiple pages.
-3.  **`execute_calculation(code)`**: Executes Python code (numpy/pandas) for math/logic. Supports local or E2B Sandbox execution.
-4.  **`generate_chart(code)`**: Creates standard visualizations using matplotlib. Supports local or E2B Sandbox execution.
-5.  **`generate_plotly_chart(code)`**: Creates advanced visualizations using Plotly (3D plots, interactive charts). Supports local or E2B Sandbox execution.
-6.  **`wolfram_alpha_query(query)`**: Queries Wolfram Alpha for complex math, scientific data, unit conversions, and facts.
-7.  **`generate_image(description)`**: Generates artistic images via Pollinations.ai.
-8.  **`get_current_datetime(timezone)`**: Returns current date/time (timezone-aware).
-9.  **`get_user_timezone()`**: Returns the user's detected timezone.
-10. **`get_coordinates(location)`**: Returns latitude/longitude for a location.
-11. **`get_weather(location)`**: Returns current weather for a location via XWeather MCP.
-12. **`get_forecast_weather(location)`**: Returns multi-day weather forecast via XWeather MCP.
-13. **`get_precipitation_timing(location)`**: Returns rain/snow start/stop timing via XWeather MCP.
-14. **`convert_md_to_pdf(markdown_text, filename)`**: Converts Markdown content to a PDF file and returns the download link.
+1.  **`search_web(query, count)`**: Web search via Tavily.
+2.  **`crawl_website(url, depth, limit)`**: deep website content extraction.
+3.  **`execute_calculation(code)`**: Python math/logic (Numpy/Pandas). Supports E2B Sandbox.
+4.  **`generate_chart(code)`**: Matplotlib visualizations (PNG). Supports E2B Sandbox.
+5.  **`generate_plotly_chart(code)`**: Interactive Plotly visualizations (HTML + PNG).
+6.  **`generate_image(prompt)`**: Artistic image generation via Pollinations.ai.
+7.  **`convert_md_to_pdf(md)`**: Create downloadable PDF documents.
+8.  **`read_uploaded_file(name)`**: Access text content of user uploads.
+9.  **`write_source_code(path, code)`**: Modify or create local source files.
+10. **`read_source_code(path)`**: Read local source files.
+11. **`import_package(pkg)`**: Dynamically install/import Python packages.
+12. **`wolfram_alpha_query(q)`**: Scientific & factual data engine.
+13. **`get_weather(loc)`**: Current conditions and multi-day forecasts.
+14. **`get_current_datetime(tz)`**: Timezone-aware date/time detection.
+15. **`chat_management`**: Tools to rename, archive, or delete conversations.
+
+## Advanced Configuration
+
+### Code Execution Mode
+In **Settings**, you can toggle between **Local** and **Sandbox** execution. 
+*   **Local:** Uses the server's Python environment (fast, but less secure).
+*   **Sandbox (E2B):** Runs code in an isolated cloud environment with a configurable timeout (default 300s). This is recommended for safety and dependency isolation.
+
+### File Context Behavior
+When a file is uploaded, the chatbot may temporarily clear conversation history to ensure the model focuses on the file content and stays within token limits. Use the **"Clear File Context"** button to restore standard history and tools after your analysis is complete.
 
 ## Troubleshooting
 
-*   **Google Login Errors:**
-    *   **Redirect URI Mismatch:** Ensure the URL in your browser matches the Authorized Redirect URI in Google Cloud Console exactly.
-    *   **Insecure Transport:** Google blocks HTTP by default. For local dev, ensure `OAUTHLIB_INSECURE_TRANSPORT=1` is in your `.env`.
-*   **Timezone Detection on Localhost:** When running locally (`127.0.0.1`), the IP detection will see a local IP (e.g., `127.0.0.1`) which cannot be geolocated. In this case, the system defaults to `UTC`. To test timezone detection, you can manually set the `X-Forwarded-For` header or deploy to a public server.
-*   **XWeather API Errors:** If you see "invalid location" errors, try specifying the location more precisely (e.g., "City, Country" or Zip Code). Ensure `XWEATHER_MCP_ID` and `XWEATHER_MCP_SECRET` are set in `.env`.
-*   **File Upload Fails:** Ensure `static/uploads/` directory exists (created automatically).
-*   **Tools Not Working After File Upload:** When a file is in context, tools are automatically disabled. Click "📎 Clear File Context" to re-enable them.
-*   **Lost Conversation History:** File analysis temporarily clears history for API compatibility. Use "Clear File Context" to restore history when done analyzing files.
-*   **Timezone Not Detected:** For localhost (127.0.0.1), timezone detection defaults to UTC. Deploy to a server with a public IP for automatic detection.
+*   **OAuth Redirects:** Ensure your Authorized Redirect URI in Google Console matches your local URL (e.g., `http://localhost:8000/auth`). If you are using a custom domain, ensure the redirect URI is set to `https://<your-domain>/auth`. Or use 192-168-X-X.sslips.io/auth (replace X with your local IP address). in that url of  the chatbot the address will be http://192-168-X-X.sslips.io/ 
+*   **Timezone Detection:** Localhost (`127.0.0.1`) geolocates to UTC. Deploy to a public IP for accurate automatic detection.
+*   **PDF Errors:** On Windows/Linux, ensure appropriate system-level headers for `cairo` are installed.
