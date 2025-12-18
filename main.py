@@ -306,7 +306,7 @@ def init_db():
 # Initialize DB on startup
 init_db()
 
-def get_conversations(user_id: Optional[int] = None, limit: int = 50, include_archived: bool = False):
+def get_conversations(user_id: Optional[int] = None, limit: int = 50, include_archived: bool = False, only_archived: bool = False):
     """Get conversations, optionally filtering out archived ones."""
     with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
         conn.row_factory = sqlite3.Row
@@ -323,7 +323,9 @@ def get_conversations(user_id: Optional[int] = None, limit: int = 50, include_ar
         else:
              query += " AND user_id IS NULL"
 
-        if not include_archived:
+        if only_archived:
+            query += " AND is_archived = 1"
+        elif not include_archived:
             query += " AND is_archived = 0"
             
         query += " ORDER BY updated_at DESC LIMIT ?"
@@ -822,10 +824,9 @@ def render_sidebar_html(current_session_id: str, user_id: Optional[int] = None) 
         """
     return sidebar_html
 
-def render_archived_list_html() -> str:
+def render_archived_list_html(user_id: Optional[int] = None) -> str:
     """Renders the archived chats list HTML."""
-    archived = get_conversations(limit=100, include_archived=True)
-    archived = [chat for chat in archived if chat.get('is_archived', 0) == 1]
+    archived = get_conversations(limit=100, only_archived=True, user_id=user_id)
     
     if not archived:
         return '<div class="text-gray-500 dark:text-gray-400 text-sm">No archived chats</div>'
@@ -900,7 +901,7 @@ async def archive_chat(session_id: str, request: Request, user_id: int = Depends
                  if row: current_user_id = row[0]
 
         sidebar_html = render_sidebar_html(current_session_id, user_id=current_user_id)
-        archived_html = render_archived_list_html()
+        archived_html = render_archived_list_html(user_id=current_user_id)
         
         return HTMLResponse(
             f'<div id="chat-list" hx-swap-oob="innerHTML">{sidebar_html}</div>'
@@ -933,7 +934,7 @@ async def unarchive_chat(session_id: str, request: Request, user_id: int = Depen
                  if row: current_user_id = row[0]
                  
         sidebar_html = render_sidebar_html(current_session_id, user_id=current_user_id)
-        archived_html = render_archived_list_html()
+        archived_html = render_archived_list_html(user_id=current_user_id)
         
         return HTMLResponse(
             f'<div id="chat-list" hx-swap-oob="innerHTML">{sidebar_html}</div>'
@@ -974,7 +975,7 @@ async def delete_chat_route(session_id: str, request: Request, user_id: int = De
                  if row: current_user_id = row[0]
 
         sidebar_html = render_sidebar_html(current_session_id, user_id=current_user_id)
-        archived_html = render_archived_list_html()
+        archived_html = render_archived_list_html(user_id=current_user_id)
         
         return HTMLResponse(
             f'<div id="chat-list" hx-swap-oob="innerHTML">{sidebar_html}</div>'
@@ -984,10 +985,14 @@ async def delete_chat_route(session_id: str, request: Request, user_id: int = De
         return HTMLResponse(f"<div>Error: {str(e)}</div>", status_code=500)
 
 @app.get("/archived-chats")
-async def get_archived_chats():
+async def get_archived_chats(user_id: int = Depends(get_current_user_id)):
     """Get list of archived chats for settings modal."""
+    # Note: verify_chat_ownership isn't needed here as we aren't accessing a specific chat,
+    # just listing the user's own archived chats.
+    if isinstance(user_id, Response): return user_id
+    
     try:
-        html = render_archived_list_html()
+        html = render_archived_list_html(user_id=user_id)
         return HTMLResponse(html)
     except Exception as e:
         return HTMLResponse(f"<div>Error: {str(e)}</div>", status_code=500)
@@ -1219,19 +1224,25 @@ def read_uploaded_file(file_name: str):
         return f"Error reading uploaded file {file_name}: {e}"
 
 
-def search_web(query: str):
+def search_web(query: str,numberofwebsearchresults: int=4):
     """
     Searches the web for the given query using Tavily to get up-to-date information.
     Use this tool when the user asks about current events, news, or specific information 
     that might not be in your training data.
+    Args:
+        query (str): The search query.
+        numberofwebsearchresults (int): The number of web search results to return. Default is 4. Max is 10.
+    Returns:
+        str: The web search results.
     """
+    numberofwebsearchresults = max(numberofwebsearchresults, 10)
     if not tavily_client:
         return "Error: Web search is not configured (missing API key)."
     
     try:
         print(f"Searching web for: {query}")
         response = tavily_client.search(query=query, search_depth="basic")
-        results = response.get('results', [])[:3]  # Limit to top 3
+        results = response.get('results', [])[:numberofwebsearchresults]  # Limit to top 3
         
         # Format results for the model
         context = "\n".join([
@@ -1454,7 +1465,7 @@ def execute_calculation(code: str, file_path: str = None, custom_package: str = 
     - any files uploaded to the execution environment will be in the root folder of the execution environment.
 
     Returns:
-        str: the result of the calculation.
+        str: the result of the calculation, could also include names of files created in the execution environment including a link to the file.
     """
     # Check execution mode
     execution_mode = execution_mode_ctx.get()
@@ -2699,7 +2710,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 if tavily_client:
                     tools.append(search_web)
                     current_instruction += """\n\n- You have access to a 'search_web' tool. You must use it whenever the user asks for current information, news, or facts you don't know. 
-                    Do NOT invent new tools. Only use 'search_web' for searching."""
+                    Do NOT invent new tools. Only use 'search_web' for searching. you can specify the number of results (max 10) with the 'numberofwebsearchresults' parameter."""
                     
                     tools.append(crawl_website)
                     current_instruction += """\n\n- You have access to a 'crawl_website' tool. 
@@ -2964,7 +2975,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             
                             # Execute tool
                             if fn_name == "search_web":
-                                api_response = search_web(fn_args.get("query"))
+                                api_response = search_web(fn_args.get("query"), fn_args.get("numberofwebsearchresults", 4))
                             elif fn_name == "crawl_website":
                                 api_response = crawl_website(
                                     fn_args.get("url"),
@@ -3456,9 +3467,10 @@ async def get_system_instruction_ui(selected_model: str = Cookie(None), executio
         # Gemini defaults
         options = [
             ("gemini-3-pro-preview", "Gemini 3 Pro Preview (New)"),
-            ("gemini-2.5-pro", "Gemini 2.5 Pro (New)"),
-            ("gemini-2.5-flash", "Gemini 2.5 Flash (New)"),
-            ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite (New)"),
+            ("gemini-3-flash-preview", "Gemini 3 Flash Preview (New)"),
+            ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+            ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+            ("gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite"),
             ("gemini-2.0-flash", "Gemini 2.0 Flash"),
             ("gemini-2.0-flash-lite", "Gemini 2.0 Flash Lite"),
         ]
