@@ -215,6 +215,8 @@ def init_db():
                 email TEXT,
                 name TEXT,
                 picture TEXT,
+                intervals_athlete_id TEXT,
+                intervals_api_key TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -278,6 +280,20 @@ def init_db():
                 session_id TEXT NOT NULL,
                 file_path TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS workouts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                external_id TEXT UNIQUE,
+                icu_event_id INTEGER,
+                start_date_local TEXT,
+                filename TEXT,
+                file_contents TEXT,
+                file_contents_confirmed TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id)
             )
         """)
         conn.execute("""
@@ -1444,6 +1460,296 @@ def delete_chat_tool(session_id: str = None):
         return "Chat deleted."
     except Exception as e:
         return f"Error deleting chat: {str(e)}"
+
+def upload_workout_to_intervals(start_date_local: str, filename: str, workout_file_content: str):
+    """
+    Uploads a workout file (.zwo format) to Intervals.icu and saves metadata to the local database.
+    
+    Args:
+        start_date_local (str): The planned date of the workout in ISO format (e.g., "2024-03-30T00:00:00").
+        filename (str): The name of the workout file (e.g., "Workout.zwo").
+        workout_file_content (str): The text content of the .zwo workout file.
+    
+    Returns:
+        str: A message indicating the result of the upload and database storage.
+    """
+    import base64
+    import json
+    import requests
+    from requests.auth import HTTPBasicAuth
+    
+    # 1. Generate unique external_id
+    external_id = str(uuid.uuid4())
+    user_id = None
+    
+    # Get user_id from session or context if possible
+    # In this app, user_id is often handled in routes. 
+    # For tool calls, we can try to find the user_id from the current session.
+    session_id = session_id_ctx.get()
+    
+    try:
+        if session_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                conn.row_factory = sqlite3.Row
+                # Step 1: Get user_id from session
+                cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row['user_id']
+                # Step 2: Get credentials from user
+                if user_id:
+                    cursor = conn.execute("SELECT intervals_athlete_id, intervals_api_key FROM users WHERE id = ?", (user_id,))
+                    u_row = cursor.fetchone()
+                    if u_row:
+                        athlete_id = u_row['intervals_athlete_id']
+                        api_key = u_row['intervals_api_key']
+        if not athlete_id or not api_key:
+            return "Error: Intervals.icu credentials not found for this user. Please configure them in settings."
+        
+        # 2. Insert into database
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.execute("""
+                INSERT INTO workouts (user_id, external_id, start_date_local, filename, file_contents)
+                VALUES (?, ?, ?, ?, ?)
+            """, (user_id, external_id, start_date_local, filename, workout_file_content))
+            conn.commit()
+            
+        # 3. Base64 encode file contents
+        file_contents_base64 = base64.b64encode(workout_file_content.encode('utf-8')).decode('utf-8')
+        
+        # 4. Call Intervals.icu API
+        url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/events?upsertOnUid=true"
+        payload = {
+            "category": "WORKOUT",
+            "start_date_local": start_date_local,
+            "filename": filename,
+            "file_contents_base64": file_contents_base64,
+            "external_id": external_id
+        }
+        
+        response = requests.post(
+            url, 
+            json=payload, 
+            auth=HTTPBasicAuth('API_KEY', api_key),
+            headers={'Accept': '*/*'}
+        )
+        
+        if response.status_code in [200, 201]:
+            resp_data = response.json()
+            icu_event_id = resp_data.get("id")
+            
+            # 5. Update DB with icu_event_id
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                conn.execute("UPDATE workouts SET icu_event_id = ? WHERE external_id = ?", (icu_event_id, external_id))
+                conn.commit()
+            
+            # 6. Confirmation GET request
+            try:
+                confirm_url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/events/{icu_event_id}/downloadzwo"
+                confirm_response = requests.get(
+                    confirm_url, 
+                    auth=HTTPBasicAuth('API_KEY', api_key),
+                    headers={'Accept': '*/*'}
+                )
+                if confirm_response.status_code == 200:
+                    file_contents_confirmed = confirm_response.text
+                    # 7. Update DB with confirmed contents
+                    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                        conn.execute("UPDATE workouts SET file_contents_confirmed = ? WHERE external_id = ?", (file_contents_confirmed, external_id))
+                        conn.commit()
+                    return f"Success: Workout '{filename}' uploaded and confirmed. (ICU ID: {icu_event_id}, Internal ID: {external_id})."
+                else:
+                    return f"Success: Workout '{filename}' uploaded (ICU ID: {icu_event_id}), but confirmation download failed. Status: {confirm_response.status_code}"
+            except Exception as confirm_e:
+                print(f"Error during confirmation GET: {str(confirm_e)}")
+                return f"Success: Workout '{filename}' uploaded (ICU ID: {icu_event_id}), but error during confirmation download: {str(confirm_e)}"
+        else:
+            return f"Error: Failed to upload to Intervals.icu. Status: {response.status_code}, Response: {response.text}"
+            
+    except Exception as e:
+        print(f"Error in upload_workout_to_intervals: {str(e)}")
+        return f"Error: {str(e)}"
+
+def delete_workout_from_intervals(start_date: str):
+    """
+    Deletes a workout from Intervals.icu calendar and the local database.
+    
+    Args:
+        start_date (str): The date of the workout to delete (e.g., "2024-03-30"). 
+                          It will match any workout starting on this date.
+    
+    Returns:
+        str: A message indicating the result of the deletion.
+    """
+    import json
+    import requests
+    from requests.auth import HTTPBasicAuth
+    
+    session_id = session_id_ctx.get()
+    user_id = None
+    athlete_id = None
+    api_key = None
+    
+    try:
+        # 1. Resolve user_id and Intervals.icu credentials
+        if session_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                conn.row_factory = sqlite3.Row
+                # Step 1: Get user_id from session
+                cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row['user_id']
+                # Step 2: Get credentials from user
+                if user_id:
+                    cursor = conn.execute("SELECT intervals_athlete_id, intervals_api_key FROM users WHERE id = ?", (user_id,))
+                    u_row = cursor.fetchone()
+                    if u_row:
+                        athlete_id = u_row['intervals_athlete_id']
+                        api_key = u_row['intervals_api_key']
+
+        if not athlete_id or not api_key:
+            return "Error: Intervals.icu credentials not found for this user. Please configure them in settings."
+        
+        # 2. Find the workout in the database
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            # We use LIKE with a wildcard to match the date even if it has a time component
+            query = "SELECT * FROM workouts WHERE user_id IS "
+            params = []
+            if user_id:
+                query += "? "
+                params.append(user_id)
+            else:
+                query += "NULL "
+            
+            query += "AND start_date_local LIKE ? AND icu_event_id IS NOT NULL"
+            params.append(f"{start_date}%")
+            
+            cursor = conn.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            
+        if not rows:
+            return f"Error: No workout found on {start_date} in the database."
+        if len(rows) > 1:
+            workouts_info = ", ".join([f"'{r['filename']}' (ID: {r['icu_event_id']})" for r in rows])
+            return f"Error: Multiple workouts found on {start_date}: {workouts_info}. Please be more specific with the date/time."
+
+        workout = rows[0]
+        icu_event_id = workout['icu_event_id']
+        filename = workout['filename']
+        
+        # 3. Call Intervals.icu API (DELETE)
+        url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/events/{icu_event_id}"
+        
+        response = requests.delete(
+            url, 
+            auth=HTTPBasicAuth('API_KEY', api_key),
+            headers={'Accept': '*/*'}
+        )
+        
+        if response.status_code == 200:
+            # 4. Remove from local database
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                conn.execute("DELETE FROM workouts WHERE id = ?", (workout['id'],))
+                conn.commit()
+            return f"Success: Workout '{filename}' (ICU ID: {icu_event_id}) deleted from Intervals.icu and local database."
+        else:
+            return f"Error: Failed to delete from Intervals.icu. Status: {response.status_code}, Response: {response.text}"
+            
+    except Exception as e:
+        print(f"Error in delete_workout_from_intervals: {str(e)}")
+        return f"Error: {str(e)}"
+
+def get_workout_from_intervals(start_date: str):
+    """
+    Retrieves full workout details from Intervals.icu calendar.
+    
+    Args:
+        start_date (str): The date of the workout to retrieve (e.g., "2024-03-30"). 
+                          It will match any workout starting on this date.
+    
+    Returns:
+        str: The full JSON payload of the workout from Intervals.icu or an error message.
+    """
+    import json
+    import requests
+    from requests.auth import HTTPBasicAuth
+    
+    session_id = session_id_ctx.get()
+    user_id = None
+    athlete_id = None
+    api_key = None
+    
+    try:
+        # 1. Resolve user_id and Intervals.icu credentials
+        if session_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                conn.row_factory = sqlite3.Row
+                # Step 1: Get user_id from session
+                cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row['user_id']
+                
+                # Step 2: Get credentials from user
+                if user_id:
+                    cursor = conn.execute("SELECT intervals_athlete_id, intervals_api_key FROM users WHERE id = ?", (user_id,))
+                    u_row = cursor.fetchone()
+                    if u_row:
+                        athlete_id = u_row['intervals_athlete_id']
+                        api_key = u_row['intervals_api_key']
+
+        if not athlete_id or not api_key:
+            return "Error: Intervals.icu credentials not found for this user. Please configure them in settings."
+        
+        # 2. Find the workout in the database
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            query = "SELECT * FROM workouts WHERE user_id IS "
+            params = []
+            if user_id:
+                query += "? "
+                params.append(user_id)
+            else:
+                query += "NULL "
+            
+            query += "AND start_date_local LIKE ? AND icu_event_id IS NOT NULL"
+            params.append(f"{start_date}%")
+            
+            cursor = conn.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            
+        if not rows:
+            return f"Error: No workout found on {start_date} in the database."
+        
+        # 3. Call Intervals.icu API for each found workout
+        all_results = []
+        
+        for idx, row in enumerate(rows, 1):
+            icu_event_id = row['icu_event_id']
+            url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/events/{icu_event_id}"
+            
+            try:
+                response = requests.get(
+                    url, 
+                    auth=HTTPBasicAuth('API_KEY', api_key),
+                    headers={'Accept': '*/*'}
+                )
+                
+                if response.status_code == 200:
+                    payload = response.json()
+                    all_results.append(f"--- Workout {idx} (ICU ID: {icu_event_id}, Filename: {row['filename']}) ---\n" + json.dumps(payload, indent=2))
+                else:
+                    all_results.append(f"--- Workout {idx} (ICU ID: {icu_event_id}) ---\nError retrieving: {response.status_code} {response.text}")
+            except Exception as api_e:
+                all_results.append(f"--- Workout {idx} (ICU ID: {icu_event_id}) ---\nException during retrieval: {str(api_e)}")
+
+        return "\n\n".join(all_results)
+            
+    except Exception as e:
+        print(f"Error in get_workout_from_intervals: {str(e)}")
+        return f"Error: {str(e)}"
 
 def execute_calculation(code: str, file_path: str = None, custom_package: str = None, timeout: int = None): 
     """
@@ -2829,6 +3135,21 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 tools.append(get_precipitation_timing)
                 current_instruction += """\n\n- You have access to a 'get_precipitation_timing' tool. 
                 - Use it when the user asks 'when will it rain?', 'when will it stop raining?', or needs precipitation timing information."""
+
+                tools.append(upload_workout_to_intervals)
+                current_instruction += """\n\n- You have access to an 'upload_workout_to_intervals' tool. 
+                - Use it when the user wants to upload a workout file (.zwo format) to Intervals.icu. 
+                - You need to provide the start_date_local (ISO format), filename, and the raw text contents of the workout file."""
+
+                tools.append(delete_workout_from_intervals)
+                current_instruction += """\n\n- You have access to a 'delete_workout_from_intervals' tool. 
+                - Use it when the user wants to delete a workout from Intervals.icu calendar. 
+                - You need to provide the start_date (e.g., '2024-03-30'). The tool will search for the workout in the local database by this date and delete it from both Intervals.icu and the local database."""
+
+                tools.append(get_workout_from_intervals)
+                current_instruction += """\n\n- You have access to a 'get_workout_from_intervals' tool. 
+                - Use it when the user wants to retrieve full details of a workout from Intervals.icu calendar for a specific date. 
+                - Provide the start_date (e.g., '2024-03-30')."""
             else:
                 # When files are present, clear history to avoid API compatibility issues
                 # Keep only the current message (last one in payload)
@@ -3046,6 +3367,12 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                 api_response = get_precipitation_timing(fn_args.get("location"))
                             elif fn_name == "wolfram_alpha_query":
                                 api_response = wolfram_alpha_query(fn_args.get("query"))
+                            elif fn_name == "upload_workout_to_intervals":
+                                api_response = upload_workout_to_intervals(fn_args.get("start_date_local"), fn_args.get("filename"), fn_args.get("workout_file_content"))
+                            elif fn_name == "delete_workout_from_intervals":
+                                api_response = delete_workout_from_intervals(fn_args.get("start_date"))
+                            elif fn_name == "get_workout_from_intervals":
+                                api_response = get_workout_from_intervals(fn_args.get("start_date"))
                             else:
                                 api_response = f"Error: Unknown tool '{fn_name}'"
                                 
