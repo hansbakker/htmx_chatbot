@@ -1573,9 +1573,10 @@ def upload_workout_to_intervals(start_date_local: str, filename: str, workout_fi
 def delete_workout_from_intervals(start_date: str):
     """
     Deletes a workout from Intervals.icu calendar and the local database.
+    if more then one workout is found on the start_date, it will delete all of them.
     
     Args:
-        start_date (str): The date of the workout to delete (e.g., "2024-03-30"). 
+        start_date (str): The date of the workout(s) to delete (e.g., "2024-03-30"). 
                           It will match any workout starting on this date.
     
     Returns:
@@ -1631,31 +1632,35 @@ def delete_workout_from_intervals(start_date: str):
             
         if not rows:
             return f"Error: No workout found on {start_date} in the database."
-        if len(rows) > 1:
-            workouts_info = ", ".join([f"'{r['filename']}' (ID: {r['icu_event_id']})" for r in rows])
-            return f"Error: Multiple workouts found on {start_date}: {workouts_info}. Please be more specific with the date/time."
+        
+        # 3. Call Intervals.icu API for each found workout
+        all_results = []
+        
+        for row in rows:
+            icu_event_id = row['icu_event_id']
+            filename = row['filename']
+            workout_id = row['id']
+            url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/events/{icu_event_id}"
+            
+            try:
+                response = requests.delete(
+                    url, 
+                    auth=HTTPBasicAuth('API_KEY', api_key),
+                    headers={'Accept': '*/*'}
+                )
+                
+                if response.status_code == 200:
+                    # 4. Remove from local database
+                    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                        conn.execute("DELETE FROM workouts WHERE id = ?", (workout_id,))
+                        conn.commit()
+                    all_results.append(f"Success: Workout '{filename}' (ICU ID: {icu_event_id}) deleted.")
+                else:
+                    all_results.append(f"Error: Workout '{filename}' (ICU ID: {icu_event_id}) failed to delete. Status: {response.status_code}, Response: {response.text}")
+            except Exception as api_e:
+                all_results.append(f"Error: Workout '{filename}' (ICU ID: {icu_event_id}) failed due to exception: {str(api_e)}")
 
-        workout = rows[0]
-        icu_event_id = workout['icu_event_id']
-        filename = workout['filename']
-        
-        # 3. Call Intervals.icu API (DELETE)
-        url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/events/{icu_event_id}"
-        
-        response = requests.delete(
-            url, 
-            auth=HTTPBasicAuth('API_KEY', api_key),
-            headers={'Accept': '*/*'}
-        )
-        
-        if response.status_code == 200:
-            # 4. Remove from local database
-            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
-                conn.execute("DELETE FROM workouts WHERE id = ?", (workout['id'],))
-                conn.commit()
-            return f"Success: Workout '{filename}' (ICU ID: {icu_event_id}) deleted from Intervals.icu and local database."
-        else:
-            return f"Error: Failed to delete from Intervals.icu. Status: {response.status_code}, Response: {response.text}"
+        return "\n".join(all_results)
             
     except Exception as e:
         print(f"Error in delete_workout_from_intervals: {str(e)}")
@@ -3143,8 +3148,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
 
                 tools.append(delete_workout_from_intervals)
                 current_instruction += """\n\n- You have access to a 'delete_workout_from_intervals' tool. 
-                - Use it when the user wants to delete a workout from Intervals.icu calendar. 
-                - You need to provide the start_date (e.g., '2024-03-30'). The tool will search for the workout in the local database by this date and delete it from both Intervals.icu and the local database."""
+                - Use it when the user wants to delete a workout(s) from Intervals.icu calendar. 
+                - You need to provide the start_date (e.g., '2024-03-30'). The tool will search for the workout(s) in the local database by this date and delete all the workouts on that date from both Intervals.icu and the local database."""
 
                 tools.append(get_workout_from_intervals)
                 current_instruction += """\n\n- You have access to a 'get_workout_from_intervals' tool. 
