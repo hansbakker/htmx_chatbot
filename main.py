@@ -3,7 +3,11 @@ import asyncio
 import uuid
 import sqlite3
 import markdown
-from xhtml2pdf import pisa
+
+try:
+    from xhtml2pdf import pisa
+except ImportError:
+    pisa = None
 import io
 import sys
 import traceback
@@ -294,6 +298,48 @@ def init_db():
                 file_contents_confirmed TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+        """)
+        
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS training_plans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                name TEXT,
+                goal TEXT,
+                methodology TEXT,
+                start_date TEXT,
+                duration_weeks INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS training_plan_weeks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                plan_id INTEGER,
+                week_number INTEGER,
+                phase TEXT,
+                focus TEXT,
+                total_volume_estimate TEXT,
+                FOREIGN KEY(plan_id) REFERENCES training_plans(id)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS training_plan_days (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                week_id INTEGER,
+                day_name TEXT,
+                workout_type TEXT,
+                details TEXT,
+                minutes INTEGER,
+                tss INTEGER,
+                intensity_factor REAL,
+                rpe INTEGER,
+                planned_date TEXT,
+                FOREIGN KEY(week_id) REFERENCES training_plan_weeks(id)
             )
         """)
         conn.execute("""
@@ -1624,7 +1670,7 @@ def delete_workout_from_intervals(start_date: str):
             else:
                 query += "NULL "
             
-            query += "AND start_date_local LIKE ? AND icu_event_id IS NOT NULL"
+            query += "AND start_date_local LIKE ? "
             params.append(f"{start_date}%")
             
             cursor = conn.execute(query, tuple(params))
@@ -1649,12 +1695,12 @@ def delete_workout_from_intervals(start_date: str):
                     headers={'Accept': '*/*'}
                 )
                 
-                if response.status_code == 200:
+                if response.status_code in (200,404,422):
                     # 4. Remove from local database
                     with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
                         conn.execute("DELETE FROM workouts WHERE id = ?", (workout_id,))
                         conn.commit()
-                    all_results.append(f"Success: Workout '{filename}' (ICU ID: {icu_event_id}) deleted.")
+                    all_results.append(f"Success: Workout '{filename}' (ICU ID: {icu_event_id}) deleted or not found.")
                 else:
                     all_results.append(f"Error: Workout '{filename}' (ICU ID: {icu_event_id}) failed to delete. Status: {response.status_code}, Response: {response.text}")
             except Exception as api_e:
@@ -1754,6 +1800,316 @@ def get_workout_from_intervals(start_date: str):
             
     except Exception as e:
         print(f"Error in get_workout_from_intervals: {str(e)}")
+        return f"Error: {str(e)}"
+
+def list_workouts_from_db():
+    """
+    Lists all workouts in the database for the current user.
+    
+    Returns:
+        str: A JSON string containing the list of workouts (excluding file contents).
+    """
+    import json
+    import sqlite3
+    
+    session_id = session_id_ctx.get()
+    user_id = None
+    
+    try:
+        # 1. Resolve user_id
+        if session_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row['user_id']
+        
+        # 2. Query workouts
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            # Include file_contents_confirmed to calculate workout_in_external_calendar
+            query = "SELECT id, external_id, icu_event_id, start_date_local, filename, created_at, file_contents_confirmed FROM workouts WHERE user_id IS "
+            params = []
+            if user_id:
+                query += "? "
+                params.append(user_id)
+            else:
+                query += "NULL "
+            
+            query += "ORDER BY start_date_local DESC" # Added ORDER BY for consistent results
+            
+            cursor = conn.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            
+        if not rows:
+            return "No workouts found in the database."
+        
+        workouts = []
+        for row in rows:
+            workout = dict(row)
+            # Add workout_in_external_calendar boolean
+            workout['workout_in_external_calendar'] = workout['file_contents_confirmed'] is not None
+            # Do NOT include the 2 file contents fields in the response.
+            if 'file_contents' in workout:
+                del workout['file_contents']
+            if 'file_contents_confirmed' in workout:
+                del workout['file_contents_confirmed']
+            workouts.append(workout)
+            
+        return json.dumps(workouts, indent=2)
+            
+    except Exception as e:
+        print(f"Error in list_workouts_from_db: {str(e)}")
+        return f"Error: {str(e)}"
+
+def save_training_plan(plan_json: str):
+    """
+    Saves a hierarchical training plan to the database.
+    
+    Args:
+        plan_json (str): The training plan as a JSON string.
+        
+    Returns:
+        str: Success message or error.
+    """
+    import json
+    import sqlite3
+    from datetime import datetime, timedelta
+    
+    session_id = session_id_ctx.get()
+    user_id = None
+    
+    try:
+        # 1. Resolve user_id
+        if session_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row[0]
+        
+        # 2. Parse JSON
+        data = json.loads(plan_json)
+        # Handle cases where the input is wrapped in markdown or is already a dict
+        if isinstance(data, str):
+             data = json.loads(data)
+             
+        plan_data = data.get("training_plan", data) # Support both wrapped and direct
+        
+        name = plan_data.get("name")
+        goal = plan_data.get("goal")
+        methodology = plan_data.get("methodology")
+        start_date_str = plan_data.get("start_date")
+        duration_weeks = plan_data.get("duration_weeks")
+        schedule = plan_data.get("schedule", [])
+
+        if not name or not start_date_str:
+            return "Error: Plan must have a name and a start_date."
+
+        # 3. Start Database Transaction
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            # Step A: Insert Plan
+            cursor = conn.execute("""
+                INSERT INTO training_plans (user_id, name, goal, methodology, start_date, duration_weeks)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (user_id, name, goal, methodology, start_date_str, duration_weeks))
+            plan_id = cursor.lastrowid
+            
+            # Helper for date calculation
+            start_dt = datetime.fromisoformat(start_date_str.split('T')[0])
+            day_map = {
+                "Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
+                "Friday": 4, "Saturday": 5, "Sunday": 6
+            }
+            
+            # Step B: Insert Weeks and Days
+            for week in schedule:
+                week_number = week.get("week_number")
+                phase = week.get("phase")
+                focus = week.get("focus")
+                volume = week.get("total_volume_estimate")
+                
+                cursor = conn.execute("""
+                    INSERT INTO training_plan_weeks (plan_id, week_number, phase, focus, total_volume_estimate)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (plan_id, week_number, phase, focus, volume))
+                week_id = cursor.lastrowid
+                
+                for day in week.get("days", []):
+                    day_name = day.get("day")
+                    workout_type = day.get("type")
+                    details = day.get("details")
+                    minutes = day.get("minutes", 0)
+                    tss = day.get("TSS", 0)
+                    intensity_factor = day.get("IF", 0.0)
+                    rpe = day.get("RPE", 0)
+                    
+                    # Calculate planned_date
+                    day_offset = day_map.get(day_name, 0)
+                    planned_date = (start_dt + timedelta(weeks=(week_number-1), days=day_offset)).strftime("%Y-%m-%d")
+                    
+                    conn.execute("""
+                        INSERT INTO training_plan_days (week_id, day_name, workout_type, details, minutes, tss, intensity_factor, rpe, planned_date)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (week_id, day_name, workout_type, details, minutes, tss, intensity_factor, rpe, planned_date))
+            
+            conn.commit()
+            
+        return f"Success: Training plan '{name}' (ID: {plan_id}) saved with {len(schedule)} weeks."
+
+    except Exception as e:
+        print(f"Error in save_training_plan: {str(e)}")
+        return f"Error: {str(e)}"
+
+def get_training_plan_week(plan_id: int, week_number: int):
+    """
+    Retrieves all details for a specific week of a training plan.
+    
+    Args:
+        plan_id (int): The ID of the training plan.
+        week_number (int): The week number to retrieve.
+        
+    Returns:
+        str: JSON string of the week details.
+    """
+    import json
+    import sqlite3
+    
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            
+            # 1. Get week info
+            cursor = conn.execute("""
+                SELECT * FROM training_plan_weeks 
+                WHERE plan_id = ? AND week_number = ?
+            """, (plan_id, week_number))
+            week_row = cursor.fetchone()
+            
+            if not week_row:
+                return f"Error: Week {week_number} not found for plan ID {plan_id}."
+            
+            week_data = dict(week_row)
+            week_id = week_data['id']
+            
+            # 2. Get days for this week
+            cursor = conn.execute("SELECT * FROM training_plan_days WHERE week_id = ? ORDER BY planned_date ASC", (week_id,))
+            days = [dict(row) for row in cursor.fetchall()]
+            
+            week_data['days'] = days
+            return json.dumps(week_data, indent=2)
+            
+    except Exception as e:
+        print(f"Error in get_training_plan_week: {str(e)}")
+        return f"Error: {str(e)}"
+
+def get_training_plan_summary(plan_id: int = None):
+    """
+    Retrieves a summary of all training plans or a specific plan's metadata.
+    
+    Args:
+        plan_id (int, optional): The ID of a specific plan to summarize.
+        
+    Returns:
+        str: JSON string of the plan(s) summary.
+    """
+    import json
+    import sqlite3
+    
+    session_id = session_id_ctx.get()
+    user_id = None
+    
+    try:
+        # 1. Resolve user_id
+        if session_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row[0]
+                    
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            
+            if plan_id:
+                # Summary for a specific plan
+                cursor = conn.execute("SELECT * FROM training_plans WHERE id = ?", (plan_id,))
+                plan = cursor.fetchone()
+                if not plan:
+                    return f"Error: Plan ID {plan_id} not found."
+                return json.dumps(dict(plan), indent=2)
+            else:
+                # List all plans for the user
+                query = "SELECT id, name, goal, start_date, duration_weeks, created_at FROM training_plans WHERE user_id IS "
+                params = []
+                if user_id:
+                    query += "? "
+                    params.append(user_id)
+                else:
+                    query += "NULL "
+                
+                cursor = conn.execute(query, tuple(params))
+                plans = [dict(row) for row in cursor.fetchall()]
+                
+                if not plans:
+                    return "No training plans found."
+                
+                return json.dumps(plans, indent=2)
+                
+    except Exception as e:
+        print(f"Error in get_training_plan_summary: {str(e)}")
+        return f"Error: {str(e)}"
+
+def query_training_plan_stats(plan_id: int, start_date: str = None, end_date: str = None):
+    """
+    Calculates aggregated statistics (TSS, minutes) for a training plan over a date range.
+    
+    Args:
+        plan_id (int): The ID of the training plan.
+        start_date (str, optional): Start of the date range (YYYY-MM-DD).
+        end_date (str, optional): End of the date range (YYYY-MM-DD).
+        
+    Returns:
+        str: JSON string of the aggregated statistics.
+    """
+    import json
+    import sqlite3
+    
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            
+            query = """
+                SELECT 
+                    COUNT(*) as total_workouts,
+                    SUM(minutes) as total_minutes,
+                    SUM(tss) as total_tss,
+                    AVG(intensity_factor) as avg_if,
+                    AVG(rpe) as avg_rpe
+                FROM training_plan_days d
+                JOIN training_plan_weeks w ON d.week_id = w.id
+                WHERE w.plan_id = ?
+            """
+            params = [plan_id]
+            
+            if start_date:
+                query += " AND d.planned_date >= ?"
+                params.append(start_date)
+            if end_date:
+                query += " AND d.planned_date <= ?"
+                params.append(end_date)
+                
+            cursor = conn.execute(query, tuple(params))
+            stats = cursor.fetchone()
+            
+            if not stats or stats['total_workouts'] == 0:
+                return "No workouts found for the given criteria."
+                
+            return json.dumps(dict(stats), indent=2)
+            
+    except Exception as e:
+        print(f"Error in query_training_plan_stats: {str(e)}")
         return f"Error: {str(e)}"
 
 def execute_calculation(code: str, file_path: str = None, custom_package: str = None, timeout: int = None): 
@@ -2985,6 +3341,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             tools = []
             current_instruction = get_system_instruction() # Start with base instruction
             has_file_in_context = uploaded_file is not None # Check if file was uploaded in this turn
+            current_instruction += f"\n\n{get_current_datetime()}" 
             
             # Check logic:
             # If we represent a "Vision" turn (uploading image/video), we disable tools and keep history (Context).
@@ -3042,11 +3399,12 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 When providing download links for files created by the 'write_source_code' tool, ALWAYS use the relative web path starting with '/' (e.g., '/static/generated_code/filename.ext'). NEVER prefix the URL with 'sandbox:', 'file://', or any other scheme.
                 It returns TEXT output. It CANNOT generate images."""
 
-                tools.append(convert_md_to_pdf)
-                current_instruction += """\n\n- You have access to a 'convert_md_to_pdf' tool.
-                Use it to convert Markdown text to a PDF file. It returns a URL to the generated PDF.
-                Always provide the link to the user so they can download it.
-                """
+                if pisa:
+                    tools.append(convert_md_to_pdf)
+                    current_instruction += """\n\n- You have access to a 'convert_md_to_pdf' tool.
+                    Use it to convert Markdown text to a PDF file. It returns a URL to the generated PDF.
+                    Always provide the link to the user so they can download it.
+                    """
                 
                 tools.append(rename_chat_tool)
                 current_instruction += """\n\n- You have access to a 'rename_chat_tool'.
@@ -3116,10 +3474,10 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 #Use it for artistic or creative image requests like 'draw a cat', 'create a sunset landscape', etc. 
                 #DO NOT use this for data visualizations - use generate_chart instead."""
 
-                tools.append(get_current_datetime)
-                current_instruction +="""\n\n- You have access to a 'get_current_datetime' tool. 
-                - Use it when asked about the current time or date. It automatically detects the user's timezone from their IP. 
-                - You can also pass a 'timezone' argument (e.g., 'Asia/Tokyo') if the user explicitly requests a specific timezone."""
+                #tools.append(get_current_datetime)
+                #current_instruction +="""\n\n- You have access to a 'get_current_datetime' tool. 
+                #- Use it when asked about the current time or date. It automatically detects the user's timezone from their IP. 
+                #- You can also pass a 'timezone' argument (e.g., 'Asia/Tokyo') if the user explicitly requests a specific timezone."""
 
                 tools.append(get_user_timezone)
                 current_instruction += """\n\n- You have access to a 'get_user_timezone' tool. 
@@ -3155,10 +3513,32 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 current_instruction += """\n\n- You have access to a 'get_workout_from_intervals' tool. 
                 - Use it when the user wants to retrieve full details of a workout from Intervals.icu calendar for a specific date. 
                 - Provide the start_date (e.g., '2024-03-30')."""
+
+                tools.append(list_workouts_from_db)
+                current_instruction += """\n\n- You have access to a 'list_workouts_from_db' tool. 
+                - Use it to list all workouts currently stored in the local database for the user. 
+                - It provides a summary (external_id, start_date_local, filename) and indicates if the workout is already confirmed in the external Intervals.icu calendar."""
+
+                tools.append(save_training_plan)
+                current_instruction += """\n\n- You have access to a 'save_training_plan' tool. 
+                - Use it to save a structured training plan (JSON) to the database. 
+                - The input should be a valid JSON string representing the training plan."""
+
+                tools.append(get_training_plan_summary)
+                current_instruction += """\n\n- You have access to a 'get_training_plan_summary' tool. 
+                - Use it to list all available training plans or get the high-level details of a specific plan."""
+
+                tools.append(get_training_plan_week)
+                current_instruction += """\n\n- You have access to a 'get_training_plan_week' tool. 
+                - Use it to retrieve the full workout schedule for a specific week of a training plan."""
+
+                tools.append(query_training_plan_stats)
+                current_instruction += """\n\n- You have access to a 'query_training_plan_stats' tool. 
+                - Use it to calculate total TSS, minutes, and other statistics for a training plan within a date range."""
             else:
                 # When files are present, clear history to avoid API compatibility issues
                 # Keep only the current message (last one in payload)
-                print("Tools disabled due to file context. Clearing history to avoid API errors.")
+                print("Tools disabled due to image file context. Clearing history to avoid API errors.")
                 if messages_payload:
                     current_msg = messages_payload[-1]  # Keep only the current message
                     messages_payload = [current_msg]
@@ -3378,6 +3758,16 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                 api_response = delete_workout_from_intervals(fn_args.get("start_date"))
                             elif fn_name == "get_workout_from_intervals":
                                 api_response = get_workout_from_intervals(fn_args.get("start_date"))
+                            elif fn_name == "list_workouts_from_db":
+                                api_response = list_workouts_from_db()
+                            elif fn_name == "save_training_plan":
+                                api_response = save_training_plan(fn_args.get("plan_json"))
+                            elif fn_name == "get_training_plan_summary":
+                                api_response = get_training_plan_summary(fn_args.get("plan_id"))
+                            elif fn_name == "get_training_plan_week":
+                                api_response = get_training_plan_week(fn_args.get("plan_id"), fn_args.get("week_number"))
+                            elif fn_name == "query_training_plan_stats":
+                                api_response = query_training_plan_stats(fn_args.get("plan_id"), fn_args.get("start_date"), fn_args.get("end_date"))
                             else:
                                 api_response = f"Error: Unknown tool '{fn_name}'"
                                 
