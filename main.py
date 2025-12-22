@@ -145,10 +145,23 @@ else:
 
 SYSTEM_INSTRUCTION_FILE = "system_instruction.txt"
 
-def get_system_instruction() -> str:
+def get_system_instruction(user_id: Optional[int] = None) -> str:
+    # 1. Try to get from User record
+    if user_id:
+        try:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                cursor = conn.execute("SELECT system_instruction FROM users WHERE id = ?", (user_id,))
+                row = cursor.fetchone()
+                if row and row[0]:
+                    return row[0]
+        except Exception as e:
+            print(f"Error fetching user instruction: {e}")
+
+    # 2. Fallback to global file or default
     if os.path.exists(SYSTEM_INSTRUCTION_FILE):
         with open(SYSTEM_INSTRUCTION_FILE, "r") as f:
             return f.read().strip()
+    
     instruction = """you are a helpfull AI assistant and you:
 - offer specific follow up actions, no general suggestions like "Would you like to know anything else?" 
 - use metric system for measurements,
@@ -221,9 +234,26 @@ def init_db():
                 picture TEXT,
                 intervals_athlete_id TEXT,
                 intervals_api_key TEXT,
+                dark_mode INTEGER DEFAULT 1,
+                system_instruction TEXT,
+                selected_model TEXT DEFAULT 'gemini-2.5-flash',
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Migration: Add settings columns if they don't exist
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN dark_mode INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN system_instruction TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN selected_model TEXT DEFAULT 'gemini-2.5-flash'")
+        except sqlite3.OperationalError:
+            pass
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
@@ -296,10 +326,18 @@ def init_db():
                 filename TEXT,
                 file_contents TEXT,
                 file_contents_confirmed TEXT,
+                training_plan_days_id INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY(user_id) REFERENCES users(id)
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(training_plan_days_id) REFERENCES training_plan_days(id)
             )
         """)
+        
+        # Migration: Add training_plan_days_id to workouts if it doesn't exist
+        try:
+            conn.execute("ALTER TABLE workouts ADD COLUMN training_plan_days_id INTEGER REFERENCES training_plan_days(id)")
+        except sqlite3.OperationalError:
+            pass
         
         conn.execute("""
             CREATE TABLE IF NOT EXISTS training_plans (
@@ -454,6 +492,42 @@ def save_setting(key: str, value: str):
     except Exception as e:
         print(f"Error saving setting {key}: {e}")
 
+def save_user_setting(user_id: int, key: str, value: any):
+    """Saves a user-specific setting (dark_mode, selected_model, system_instruction)."""
+    if key not in ['dark_mode', 'selected_model', 'system_instruction']:
+        print(f"Unknown user setting: {key}")
+        return
+        
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.execute(f"UPDATE users SET {key} = ? WHERE id = ?", (value, user_id))
+            conn.commit()
+    except Exception as e:
+        print(f"Error saving user setting {key}: {e}")
+
+def get_user_settings(user_id: int) -> dict:
+    """Retrieves all settings for a specific user."""
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT dark_mode, selected_model, system_instruction FROM users WHERE id = ?", (user_id,))
+            row = cursor.fetchone()
+            if row:
+                settings = dict(row)
+                # If instruction is empty, fallback to global
+                if not settings.get('system_instruction'):
+                    settings['system_instruction'] = get_system_instruction(None)
+                return settings
+    except Exception as e:
+        print(f"Error fetching user settings: {e}")
+    
+    # Defaults
+    return {
+        "dark_mode": 1,
+        "selected_model": "gemini-2.5-flash",
+        "system_instruction": get_system_instruction(None)
+    }
+
 @retry_on_db_lock()
 def get_history(session_id: str) -> List[Dict[str, str]]:
     """Retrieves history for a specific session ID from DB."""
@@ -591,6 +665,13 @@ async def get_home(request: Request, response: Response):
         # Mandatory Login: Redirect to login page if not authenticated
         return RedirectResponse(url='/login')
 
+    # Load user settings
+    user_settings = get_user_settings(current_user_id) if current_user_id else {
+        "dark_mode": 1,
+        "selected_model": "gemini-2.5-flash",
+        "system_instruction": get_system_instruction(None)
+    }
+
     # Check if user already has a session cookie
     session_id = request.cookies.get("session_id")
     
@@ -602,7 +683,7 @@ async def get_home(request: Request, response: Response):
 
     if not session_id:
         session_id = str(uuid.uuid4())
-        
+
     # Load history to render
     chat_history_html = ""
     
@@ -724,7 +805,8 @@ async def get_home(request: Request, response: Response):
         "conversations": conversations,
         "current_session_id": session_id,
         "current_chat_title": current_chat_title,
-        "user": user_info # Pass user info to template
+        "user": user_info, # Pass user info to template
+        "user_settings": user_settings
     })
     
     # Set cookie if it was missing
@@ -1058,6 +1140,29 @@ async def get_archived_chats(user_id: int = Depends(get_current_user_id)):
         return HTMLResponse(html)
     except Exception as e:
         return HTMLResponse(f"<div>Error: {str(e)}</div>", status_code=500)
+
+@app.post("/save-user-settings")
+async def save_user_settings_route(
+    selected_model: str = Form(...),
+    system_instruction: str = Form(...),
+    user_id: int = Depends(get_current_user_id)
+):
+    if isinstance(user_id, Response): return user_id
+    
+    save_user_setting(user_id, 'selected_model', selected_model)
+    save_user_setting(user_id, 'system_instruction', system_instruction)
+    
+    return HTMLResponse("<div>Settings saved successfully</div>")
+
+@app.post("/toggle-dark-mode")
+async def toggle_dark_mode_route(
+    dark_mode: int = Form(...),
+    user_id: int = Depends(get_current_user_id)
+):
+    if isinstance(user_id, Response): return user_id
+    
+    save_user_setting(user_id, 'dark_mode', dark_mode)
+    return Response(status_code=200)
 
 # Helper to render messages (DRY)
 def render_user_message(content: str, image_path: Optional[str] = None) -> str:
@@ -1507,7 +1612,7 @@ def delete_chat_tool(session_id: str = None):
     except Exception as e:
         return f"Error deleting chat: {str(e)}"
 
-def upload_workout_to_intervals(start_date_local: str, filename: str, workout_file_content: str):
+def upload_workout_to_intervals(start_date_local: str, filename: str, workout_file_content: str, training_plan_days_id: int):
     """
     Uploads a workout file (.zwo format) to Intervals.icu and saves metadata to the local database.
     
@@ -1515,6 +1620,7 @@ def upload_workout_to_intervals(start_date_local: str, filename: str, workout_fi
         start_date_local (str): The planned date of the workout in ISO format (e.g., "2024-03-30T00:00:00").
         filename (str): The name of the workout file (e.g., "Workout.zwo").
         workout_file_content (str): The text content of the .zwo workout file.
+        training_plan_days_id (int): The ID of the training plan day associated with the workout.
     
     Returns:
         str: A message indicating the result of the upload and database storage.
@@ -1555,9 +1661,9 @@ def upload_workout_to_intervals(start_date_local: str, filename: str, workout_fi
         # 2. Insert into database
         with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
             conn.execute("""
-                INSERT INTO workouts (user_id, external_id, start_date_local, filename, file_contents)
-                VALUES (?, ?, ?, ?, ?)
-            """, (user_id, external_id, start_date_local, filename, workout_file_content))
+                INSERT INTO workouts (user_id, external_id, start_date_local, filename, file_contents, training_plan_days_id)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (user_id, external_id, start_date_local, filename, workout_file_content, training_plan_days_id))
             conn.commit()
             
         # 3. Base64 encode file contents
@@ -1829,7 +1935,7 @@ def list_workouts_from_db():
         with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
             conn.row_factory = sqlite3.Row
             # Include file_contents_confirmed to calculate workout_in_external_calendar
-            query = "SELECT id, external_id, icu_event_id, start_date_local, filename, created_at, file_contents_confirmed FROM workouts WHERE user_id IS "
+            query = "SELECT id, external_id, icu_event_id, start_date_local, filename, created_at, file_contents_confirmed, training_plan_days_id FROM workouts WHERE user_id IS "
             params = []
             if user_id:
                 query += "? "
@@ -1869,7 +1975,89 @@ def save_training_plan(plan_json: str):
     
     Args:
         plan_json (str): The training plan as a JSON string.
-        
+    
+    Example:
+    {
+    "training_plan": {
+        "name": "12-Week Polarized: Endurance & Peak Power (Weekly Detail)",
+        "goal": "Build deep aerobic base while maximizing neuromuscular power output.",
+        "methodology": "Polarized (80/20)",
+        "duration_weeks": 12,
+        "schedule": [
+            {
+                "week_number": 1,
+                "phase": "Phase 1: Base & Neuromuscular Activation",
+                "focus": "Introduction to Sprint Load",
+                "total_volume_estimate": "8-9 hours",
+                "days": [
+                    {
+                        "day": "Monday",
+                        "type": "Rest",
+                        "details": "Complete Rest",
+                        "minutes": 0,
+                        "TSS": 0,
+                        "IF": 0,
+                        "RPE": 0
+                    },
+                    {
+                        "day": "Tuesday",
+                        "type": "High Intensity",
+                        "details": "6 x 10s MAX Sprints (Torque focus). Rest 5m between.",
+                        "minutes": 60,
+                        "TSS": 0,
+                        "IF": 0,
+                        "RPE": 0
+                    },
+                    {
+                        "day": "Wednesday",
+                        "type": "Endurance",
+                        "details": "Zone 1 Steady.",
+                        "minutes": 90,
+                        "TSS": 0,
+                        "IF": 0,
+                        "RPE": 0
+                    },
+                    {
+                        "day": "Thursday",
+                        "type": "Endurance",
+                        "details": "Zone 1 + 3 x 1m High Cadence (110rpm).",
+                        "minutes": 60,
+                        "TSS": 0,
+                        "IF": 0,
+                        "RPE": 0
+                    },
+                    {
+                        "day": "Friday",
+                        "type": "Active Recovery",
+                        "details": "Coffee spin.",
+                        "minutes": 30,
+                        "TSS": 0,
+                        "IF": 0,
+                        "RPE": 0
+                    },
+                    {
+                        "day": "Saturday",
+                        "type": "High Intensity",
+                        "details": "4 x 4m @ 105% FTP. Rest 4m between.",
+                        "minutes": 90,
+                        "TSS": 0,
+                        "IF": 0,
+                        "RPE": 0
+                    },
+                    {
+                        "day": "Sunday",
+                        "type": "Long Endurance",
+                        "details": "Strict Zone 1.",
+                        "minutes": 150,
+                        "TSS": 0,
+                        "IF": 0,
+                        "RPE": 0
+                    }
+                ]
+            }
+        ]
+    }
+} 
     Returns:
         str: Success message or error.
     """
@@ -2009,7 +2197,7 @@ def get_training_plan_summary(plan_id: int = None):
     Retrieves a summary of all training plans or a specific plan's metadata.
     
     Args:
-        plan_id (int, optional): The ID of a specific plan to summarize.
+        plan_id (int, optional): The ID of a specific plan to summarize. If None, returns all plans for the user.
         
     Returns:
         str: JSON string of the plan(s) summary.
@@ -2063,7 +2251,8 @@ def get_training_plan_summary(plan_id: int = None):
 
 def query_training_plan_stats(plan_id: int, start_date: str = None, end_date: str = None):
     """
-    Calculates aggregated statistics (TSS, minutes) for a training plan over a date range.
+    Calculates aggregated statistics (TSS, minutes) for a training plan over a date range. 
+    If no date range is specified, returns stats for the entire plan.
     
     Args:
         plan_id (int): The ID of the training plan.
@@ -3241,9 +3430,20 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
     if request.client:
         client_ip_ctx.set(request.client.host)
     
-    # Fallback to DB settings
+    # Fetch user settings if logged in
+    user_settings = None
+    user_id = None
+    if session_id:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+            row = cursor.fetchone()
+            if row:
+                user_id = row[0]
+                user_settings = get_user_settings(user_id)
+
+    # Fallback/Override logic
     if selected_model is None:
-        selected_model = get_setting("selected_model", "gemini-2.5-flash")
+        selected_model = user_settings['selected_model'] if user_settings else get_setting("selected_model", "gemini-2.5-flash")
     if execution_mode is None:
         execution_mode = get_setting("execution_mode", "local")
 
@@ -3339,7 +3539,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             # 2. Call Gemini
             # Prepare the model's tools and system instruction
             tools = []
-            current_instruction = get_system_instruction() # Start with base instruction
+            current_instruction = get_system_instruction(user_id) # Start with base instruction
             has_file_in_context = uploaded_file is not None # Check if file was uploaded in this turn
             current_instruction += f"\n\n{get_current_datetime()}" 
             
@@ -3501,7 +3701,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
 
                 tools.append(upload_workout_to_intervals)
                 current_instruction += """\n\n- You have access to an 'upload_workout_to_intervals' tool. 
-                - Use it when the user wants to upload a workout file (.zwo format) to Intervals.icu. 
+                - Use it when the user wants to create and schedule a actual workout based on the training plan
+                 and upload the workout file (.zwo format) for a specific date to Intervals.icu. 
                 - You need to provide the start_date_local (ISO format), filename, and the raw text contents of the workout file."""
 
                 tools.append(delete_workout_from_intervals)
@@ -3512,7 +3713,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 tools.append(get_workout_from_intervals)
                 current_instruction += """\n\n- You have access to a 'get_workout_from_intervals' tool. 
                 - Use it when the user wants to retrieve full details of a workout from Intervals.icu calendar for a specific date. 
-                - Provide the start_date (e.g., '2024-03-30')."""
+                - Provide the workout start_date (e.g., '2024-03-30')."""
 
                 tools.append(list_workouts_from_db)
                 current_instruction += """\n\n- You have access to a 'list_workouts_from_db' tool. 
@@ -3753,7 +3954,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                             elif fn_name == "wolfram_alpha_query":
                                 api_response = wolfram_alpha_query(fn_args.get("query"))
                             elif fn_name == "upload_workout_to_intervals":
-                                api_response = upload_workout_to_intervals(fn_args.get("start_date_local"), fn_args.get("filename"), fn_args.get("workout_file_content"))
+                                api_response = upload_workout_to_intervals(fn_args.get("start_date_local"), fn_args.get("filename"), fn_args.get("workout_file_content"), fn_args.get("training_plan_days_id"))
                             elif fn_name == "delete_workout_from_intervals":
                                 api_response = delete_workout_from_intervals(fn_args.get("start_date"))
                             elif fn_name == "get_workout_from_intervals":
@@ -4163,17 +4364,18 @@ def clear_file_context(session_id: str = Cookie(None)):
 
 
 @app.get("/settings/system_instruction", response_class=HTMLResponse)
-async def get_system_instruction_ui(selected_model: str = Cookie(None), execution_mode: str = Cookie(None)):
-    # Fallback to DB setting if cookie is missing
-    if selected_model is None:
-        selected_model = get_setting("selected_model", "gemini-2.5-flash")
-    if execution_mode is None:
-        execution_mode = get_setting("execution_mode", "local")
+async def get_system_instruction_ui(user_id: int = Depends(get_current_user_id)):
+    if isinstance(user_id, Response): return user_id
     
+    user_settings = get_user_settings(user_id)
+    selected_model = user_settings['selected_model']
+    instruction = user_settings['system_instruction']
+    
+    # We still use local/cookie/settings table for these for now if not in user? 
+    # Actually let's just stick to the requested ones for the user table.
+    execution_mode = get_setting("execution_mode", "local")
     e2b_timeout = get_setting("e2b_timeout", "300")
         
-    instruction = get_system_instruction()
-    
     # Generate model options dynamically based on provider
     provider = os.getenv("LLM_PROVIDER", "gemini").lower()
     is_openai = provider == "openai"
@@ -4323,8 +4525,19 @@ async def get_system_instruction_ui(selected_model: str = Cookie(None), executio
     """
 
 @app.post("/settings/system_instruction", response_class=HTMLResponse)
-async def post_system_instruction(instruction: str = Form(...), model: str = Form(...), execution_mode: str = Form(None), e2b_timeout: int = Form(300)):
-    save_system_instruction(instruction)
+async def post_system_instruction(
+    instruction: str = Form(...), 
+    model: str = Form(...), 
+    execution_mode: str = Form(None), 
+    e2b_timeout: int = Form(300),
+    user_id: int = Depends(get_current_user_id)
+):
+    if isinstance(user_id, Response): return user_id
+    
+    # Save to User table
+    save_user_setting(user_id, 'selected_model', model)
+    save_user_setting(user_id, 'system_instruction', instruction)
+
     response = Response(content="""
     <div id="settings-modal" class="fixed inset-0 z-50 flex items-end justify-center p-4 pointer-events-none">
         <div class="bg-green-50 text-green-700 border border-green-200 px-6 py-4 rounded-xl shadow-lg flex items-center gap-3 animate-fade-in-up pointer-events-auto">
@@ -4349,8 +4562,7 @@ async def post_system_instruction(instruction: str = Form(...), model: str = For
     mode_value = "e2b" if execution_mode == "e2b" else "local"
     response.set_cookie(key="execution_mode", value=mode_value)
     
-    # Save to DB for persistence
-    save_setting("selected_model", model)
+    # Save global fallbacks/other settings
     save_setting("execution_mode", mode_value)
     save_setting("e2b_timeout", str(e2b_timeout))
     

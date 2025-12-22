@@ -1,5 +1,4 @@
-<!DOCTYPE html>
-<html lang="en" class="h-full">
+<html lang="en" class="h-full {% if user_settings.dark_mode == 1 %}dark{% endif %}">
 
 <head>
 	<meta charset="UTF-8">
@@ -339,28 +338,22 @@
 		function toggleDarkMode() {
 			const html = document.documentElement;
 			const isDark = html.classList.contains('dark');
+			const newDarkMode = isDark ? 0 : 1;
 
 			if (isDark) {
 				html.classList.remove('dark');
-				localStorage.setItem('darkMode', 'false');
 			} else {
 				html.classList.add('dark');
-				localStorage.setItem('darkMode', 'true');
 			}
-		}
 
-		// Initialize dark mode from localStorage
-		// Initialize dark mode from localStorage
-		(function () {
-			const darkMode = localStorage.getItem('darkMode');
-			// Default to dark mode if not set, or if explicitly true
-			if (darkMode === 'true' || darkMode === null) {
-				document.documentElement.classList.add('dark');
-				if (darkMode === null) {
-					localStorage.setItem('darkMode', 'true');
-				}
-			}
-		})();
+			// Persist to DB
+			const formData = new FormData();
+			formData.append('dark_mode', newDarkMode);
+			fetch('/toggle-dark-mode', {
+				method: 'POST',
+				body: formData
+			});
+		}
 
 		// Context Menu Functions
 		function toggleMenu(menuId) {
