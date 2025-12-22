@@ -848,7 +848,7 @@ async def get_home(request: Request, response: Response):
     with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.execute(
-            "SELECT role, content, image_path FROM messages WHERE session_id = ? ORDER BY id ASC", 
+            "SELECT role, content, image_path, timestamp FROM messages WHERE session_id = ? ORDER BY id ASC", 
             (session_id,)
         )
         rows = cursor.fetchall()
@@ -857,6 +857,7 @@ async def get_home(request: Request, response: Response):
             role = row["role"]
             content = row["content"]
             image_path = row["image_path"]
+            timestamp = row["timestamp"]
 
             # Handle internal function responses
             if role == "function":
@@ -942,7 +943,7 @@ async def get_home(request: Request, response: Response):
                     continue
 
             if role == "user":
-                chat_history_html += render_user_message(content, image_path)
+                chat_history_html += render_user_message(content, image_path, timestamp)
             else:
                 chat_history_html += render_bot_message(content)
 
@@ -1323,7 +1324,7 @@ async def toggle_dark_mode_route(
     return Response(status_code=200)
 
 # Helper to render messages (DRY)
-def render_user_message(content: str, image_path: Optional[str] = None) -> str:
+def render_user_message(content: str, image_path: Optional[str] = None, timestamp: Optional[str] = None) -> str:
     image_html = ""
     if image_path:
         # Check if it's an image by extension (simple check for rendering)
@@ -1338,12 +1339,24 @@ def render_user_message(content: str, image_path: Optional[str] = None) -> str:
                 <span class="text-xs text-white truncate max-w-[200px]">{os.path.basename(image_path)}</span>
             </div>
             '''
-        
+            
+    timestamp_html = ""
+    if timestamp:
+        try:
+            # Format timestamp nicely (assuming SQLite format YYYY-MM-DD HH:MM:SS)
+            from datetime import datetime
+            dt = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S")
+            formatted_ts = dt.strftime("%b %d, %H:%M")
+            timestamp_html = f'<div class="text-[10px] text-gray-400 dark:text-gray-500 mb-1 px-1 text-right w-full">{formatted_ts}</div>'
+        except:
+             timestamp_html = f'<div class="text-[10px] text-gray-400 dark:text-gray-500 mb-1 px-1 text-right w-full">{timestamp}</div>'
+
     return f"""
-    <div class="flex justify-end mb-4 animate-fade-in">
-        <div class="bg-blue-600 text-white px-5 py-3 rounded-2xl rounded-tr-sm max-w-[80%] shadow-sm">
+    <div class="flex flex-col items-end mb-4 animate-fade-in group">
+        {timestamp_html}
+        <div class="user-msg-bubble relative bg-blue-600 text-white px-5 py-3 rounded-2xl rounded-tr-sm max-w-[80%] shadow-sm transition-all duration-200 group-hover:shadow-md">
             {image_html}
-            <p class="text-sm leading-relaxed">{content}</p>
+            <p class="text-sm leading-relaxed whitespace-pre-wrap">{content}</p>
         </div>
     </div>
     """
@@ -1382,14 +1395,45 @@ def render_bot_message(content: str, stream_id: Optional[str] = None, final: boo
     # If it's the final content (or historical content)
     # Preprocess: Convert .html image syntax to links (HTML files can't be embedded as images)
     import re
+    import uuid
     content = re.sub(
         r'!\[([^\]]*)\]\(([^)]+\.html)\)',
         r'<a href="\2" onclick="event.stopPropagation(); event.preventDefault(); window.open(this.href, \'_blank\'); return false;" class="text-blue-500 hover:underline">🔗 Open interactive chart</a>',
         content
     )
     
-    # Enable tables extension
-    html_content = markdown.markdown(content, extensions=['fenced_code', 'tables'])
+    # 1. Protect Code Blocks first (to prevent math-masking inside code)
+    # This keeps both fenced code and inline code pristine.
+    code_placeholders = {}
+    code_pattern = r'(```.*?```|`.*?`)'
+    def mask_code(match):
+        placeholder = f"MARKDOWN_CODE_PROTECTED_{uuid.uuid4().hex}__"
+        code_placeholders[placeholder] = match.group(0)
+        return placeholder
+    
+    content_no_code = re.sub(code_pattern, mask_code, content, flags=re.DOTALL)
+    
+    # 2. Protect Math Blocks in the code-free content
+    math_placeholders = {}
+    # Priority: Block math patterns first ($$...$$, \[...\]), then inline ($, \(\))
+    math_pattern = r'(\$\$.*?\$\$|\\\[.*?\\\]|\$.*?\$|\\\(.*?\\\))'
+    def mask_math(match):
+        placeholder = f"LATEX_MATH_PROTECTED_{uuid.uuid4().hex}__"
+        math_placeholders[placeholder] = match.group(0)
+        return placeholder
+    
+    protected_content = re.sub(math_pattern, mask_math, content_no_code, flags=re.DOTALL)
+    
+    # 3. Run Markdown on protected content
+    html_content = markdown.markdown(protected_content, extensions=['fenced_code', 'tables'])
+    
+    # 4. Restore Math Blocks
+    for placeholder, original in math_placeholders.items():
+        html_content = html_content.replace(placeholder, original)
+        
+    # 5. Restore Code Blocks
+    for placeholder, original in code_placeholders.items():
+        html_content = html_content.replace(placeholder, original)
     
     suggestions_html = ""
     if suggestions:
@@ -2531,6 +2575,20 @@ def query_training_plan_stats(plan_id: int, start_date: str = None, end_date: st
         print(f"Error in query_training_plan_stats: {str(e)}")
         return f"Error: {str(e)}"
 
+def calculator_tool(expr: str):
+    """
+    Use this tool for to evaluate simple math expressions. 
+    args:
+        expr (str): The math expression to evaluate.
+    returns:
+        str: The result of the evaluation.
+    """
+
+    try:
+        return str(eval (expr, {"__builtins__": {}}))
+    except Exception:
+        return "Invalid expression"
+
 def execute_calculation(code: str, file_path: str = None, custom_package: str = None, timeout: int = None): 
     """
     Executes Python code for calculations, logic, and text processing.
@@ -3622,7 +3680,9 @@ async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile 
     stream_id = f"msg-{uuid.uuid4()}"
     
     # Render User Message
-    user_message_html = render_user_message(prompt, image_path)
+    from datetime import datetime
+    now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    user_message_html = render_user_message(prompt, image_path, now_ts)
     
     # Render Bot Placeholder
     # Pass image_path in URL for stream
@@ -3902,7 +3962,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 - GUIDELINES:
                 - Convert inputs to simplified keyword queries (e.g. "France population" instead of "how many people live in France").
                 - Send queries in English only.
-                - Use proper Markdown for math formulas: '$$...$$' for block, '\\(...\\)' for inline.
+                - Use proper Markdown for math formulas: '$$...$$' for block formulas, and '\(... \)' for inline formulas.
                 - Use named physical constants (e.g., 'speed of light') without numerical substitution.
                 - Include a space between compound units (e.g., "m Ω" instead of "mΩ").
                 - If data for multiple properties is needed, make separate calls for each property.
@@ -4134,7 +4194,7 @@ Technical Specifications for the workout .zwo Files (Critical)
             
             - when providing a URL make sure it's clickable, with target being a new tab
             - when using search_web tool, remember the urls that were used
-            - When you have still work to do before the answer is final, end every intermediate response with "/nContinuing..."
+            - When you have still work to do before the answer is final, end every intermediate response with "\nContinuing..."
             """
             
             # We need to handle potential function calls in a loop
@@ -4299,6 +4359,8 @@ Technical Specifications for the workout .zwo Files (Critical)
                                 api_response = write_source_code(session_id, fn_args.get("file_path"), fn_args.get("code"))  
                             elif fn_name == "import_package":
                                 api_response = import_package(fn_args.get("package_name"))
+                            elif fn_name == "calculator_tool":
+                                api_response = calculator_tool(fn_args.get("expr"))
                             elif fn_name == "execute_calculation":
                                 api_response = execute_calculation(fn_args.get("code"), fn_args.get("file_path"), fn_args.get("custom_package"), fn_args.get("timeout"))
                             elif fn_name == "generate_chart":
@@ -5046,3 +5108,86 @@ async def post_delete_memory(memory_id: int, user_id: int = Depends(get_current_
     if delete_user_memory(memory_id, user_id):
         return ""
     raise HTTPException(status_code=500, detail="Failed to delete memory")
+
+@app.get("/rename-chat-ui", response_class=HTMLResponse)
+async def get_rename_chat_ui(request: Request, user_id: int = Depends(get_current_user_id)):
+    if isinstance(user_id, Response): return user_id
+    session_id = request.cookies.get("session_id")
+    if not session_id:
+        return "Error: No active session"
+    
+    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+        cursor = conn.execute("SELECT title FROM conversations WHERE id = ? AND user_id = ?", (session_id, user_id))
+        row = cursor.fetchone()
+        title = row[0] if row else "New Chat"
+
+    return f"""
+    <div id="chat-title-container" class="flex items-center gap-2">
+        <form hx-post="/save-chat-name" hx-target="#chat-title-container" hx-swap="outerHTML" class="flex items-center gap-2">
+            <input type="text" name="new_name" value="{title}" 
+                class="w-96 bg-gray-100 dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded px-2 py-1 text-sm font-semibold text-gray-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                onfocus="this.select()" autofocus>
+            <button type="submit" class="text-green-500 hover:text-green-600 p-1">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+                </svg>
+            </button>
+            <button type="button" hx-get="/cancel-rename" hx-target="#chat-title-container" hx-swap="outerHTML" class="text-red-500 hover:text-red-600 p-1">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+            </button>
+        </form>
+    </div>
+    """
+
+@app.get("/cancel-rename", response_class=HTMLResponse)
+async def cancel_rename(request: Request, user_id: int = Depends(get_current_user_id)):
+    if isinstance(user_id, Response): return user_id
+    session_id = request.cookies.get("session_id")
+    title = "New Chat"
+    if session_id:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            cursor = conn.execute("SELECT title FROM conversations WHERE id = ? AND user_id = ?", (session_id, user_id))
+            row = cursor.fetchone()
+            if row: title = row[0]
+            
+    return f"""
+    <div id="chat-title-container" class="flex items-center gap-1 group">
+        <h1 id="chat-title-header" class="font-semibold text-gray-800 dark:text-gray-100 text-lg tracking-tight ml-2">{title}</h1>
+        <button hx-get="/rename-chat-ui" hx-target="#chat-title-container" hx-swap="outerHTML"
+            class="opacity-0 group-hover:opacity-100 p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-opacity"
+            title="Rename Chat">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400 hover:text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+            </svg>
+        </button>
+    </div>
+    """
+
+@app.post("/save-chat-name", response_class=HTMLResponse)
+async def save_chat_name(request: Request, new_name: str = Form(...), user_id: int = Depends(get_current_user_id)):
+    if isinstance(user_id, Response): return user_id
+    session_id = request.cookies.get("session_id")
+    if not session_id:
+        return "Error: No active session"
+    
+    with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+        conn.execute("UPDATE conversations SET title = ? WHERE id = ? AND user_id = ?", (new_name, session_id, user_id))
+        conn.commit()
+    
+    sidebar_html = render_sidebar_html(session_id, user_id=user_id)
+    
+    return f"""
+    <div id="chat-title-container" class="flex items-center gap-1 group">
+        <h1 id="chat-title-header" class="font-semibold text-gray-800 dark:text-gray-100 text-lg tracking-tight ml-2">{new_name}</h1>
+        <button hx-get="/rename-chat-ui" hx-target="#chat-title-container" hx-swap="outerHTML"
+            class="opacity-0 group-hover:opacity-100 p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-opacity"
+            title="Rename Chat">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400 hover:text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+            </svg>
+        </button>
+        <div id="chat-list" hx-swap-oob="innerHTML">{sidebar_html}</div>
+    </div>
+    """

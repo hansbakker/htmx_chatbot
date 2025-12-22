@@ -1,3 +1,4 @@
+<!DOCTYPE html>
 <html lang="en" class="h-full {% if user_settings.dark_mode == 1 %}dark{% endif %}">
 
 <head>
@@ -39,10 +40,10 @@
 	<!-- KaTeX -->
 	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"
 		integrity="sha384-n8MVd4RsNIU0tAv4ct0nTaAbDJwPJzDEaqSD1odI+WdtXRGWt2kTvGFasHpSy3SV" crossorigin="anonymous">
-	<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"
+	<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"
 		integrity="sha384-XjKyOOlGwcjNTAIQHIpgOno0Hl1YQqzUOEleOLALmuqehneUG+vnGctmUb0ZY0l8"
 		crossorigin="anonymous"></script>
-	<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+	<script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
 		integrity="sha384-+VBxd3r6XgURycqtZ117nYw44OOcIax56Z4dCRWbxyPt0Koah1uHoK0o4+/RRE05"
 		crossorigin="anonymous"></script>
 
@@ -238,9 +239,20 @@
 
 					<img src="/static/chatbot_icon.png" alt="Chatbot Icon" class="w-8 h-8 rounded-lg object-contain">
 
-					<h1 id="chat-title-header"
-						class="font-semibold text-gray-800 dark:text-gray-100 text-lg tracking-tight ml-2">{{
-						current_chat_title }}</h1>
+					<div id="chat-title-container" class="flex items-center gap-1 group">
+						<h1 id="chat-title-header"
+							class="font-semibold text-gray-800 dark:text-gray-100 text-lg tracking-tight ml-2">{{
+							current_chat_title }}</h1>
+						<button hx-get="/rename-chat-ui" hx-target="#chat-title-container" hx-swap="outerHTML"
+							class="opacity-0 group-hover:opacity-100 p-1 hover:bg-gray-100 dark:hover:bg-gray-700 rounded transition-opacity"
+							title="Rename Chat">
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-400 hover:text-blue-500"
+								fill="none" viewBox="0 0 24 24" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+									d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+							</svg>
+						</button>
+					</div>
 				</div>
 				<div class="flex items-center gap-2">
 					<!-- Dark Mode Toggle -->
@@ -576,47 +588,134 @@
 			});
 		}
 
+		// Add Copy Buttons to User Messages
+		function addUserMessageCopyButtons(content) {
+			content.querySelectorAll('.user-msg-bubble').forEach((msgDiv) => {
+				if (msgDiv.querySelector('.user-copy-btn')) return;
+				if (getComputedStyle(msgDiv).position === 'static') {
+					msgDiv.style.position = 'relative';
+				}
+				msgDiv.classList.add('group');
+
+				const btn = document.createElement('button');
+				btn.className = 'user-copy-btn absolute top-2 right-2 bg-blue-500 hover:bg-blue-400 text-blue-100 dark:text-blue-100 rounded p-1 transition-all opacity-0 group-hover:opacity-100 focus:opacity-100 shadow-sm border border-blue-400 z-10 hidden sm:flex items-center justify-center';
+				btn.innerHTML = `
+					<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+						<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" />
+					</svg>
+				`;
+				btn.title = "Copy prompt";
+
+				btn.addEventListener('click', async (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+
+					const clone = msgDiv.cloneNode(true);
+					clone.querySelectorAll('button').forEach(b => b.remove());
+					clone.querySelectorAll('.user-copy-btn').forEach(b => b.remove());
+
+					const text = clone.innerText || clone.textContent;
+
+					try {
+						if (!navigator.clipboard && document.execCommand) {
+							const textarea = document.createElement('textarea');
+							textarea.value = text.trim();
+							textarea.style.position = 'fixed';
+							textarea.style.left = '-9999px';
+							document.body.appendChild(textarea);
+							textarea.select();
+							document.execCommand('copy');
+							document.body.removeChild(textarea);
+						} else {
+							await navigator.clipboard.writeText(text.trim());
+						}
+
+						const originalHtml = btn.innerHTML;
+						btn.innerHTML = `
+							<svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-green-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+								<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+							</svg>
+						`;
+						setTimeout(() => {
+							btn.innerHTML = originalHtml;
+						}, 2000);
+					} catch (err) {
+						console.error('Failed to copy prompt:', err);
+					}
+				});
+
+				msgDiv.appendChild(btn);
+			});
+		}
+
+		// Centralized Math Rendering with Diagnostics
+		function renderMath(element, source = "unknown") {
+			try {
+				const mathConfig = {
+					delimiters: [
+						{ left: '$$', right: '$$', display: true },
+						{ left: '$', right: '$', display: false },
+						{ left: '\\(', right: '\\)', display: false },
+						{ left: '\\[', right: '\\]', display: true }
+					],
+					throwOnError: false
+				};
+
+				const renderer = typeof renderMathInElement !== 'undefined' ? renderMathInElement : window.renderMathInElement;
+
+				if (renderer) {
+					// Add a small delay for dynamic content to ensure DOM is ready
+					const delay = (source === "htmx") ? 50 : 0;
+					setTimeout(() => {
+						renderer(element, mathConfig);
+						console.log(`[Math] Rendered ${source} at`, new Date().toLocaleTimeString());
+					}, delay);
+				} else {
+					console.error(`[Math] KaTeX renderer NOT found for ${source}! Check script loading.`);
+				}
+			} catch (e) {
+				console.error(`[Math] Error in ${source}:`, e);
+			}
+		}
+
 		// Use htmx.onLoad for reliable rendering of new content (including OOB swaps)
 		htmx.onLoad(function (content) {
-			// Add copy buttons first
-			addCopyButtons(content);
-			addMessageCopyButtons(content);
+			// 1. Render Math
+			renderMath(content, "htmx");
 
-			// Highlight code
-			content.querySelectorAll('pre code').forEach((block) => {
-				hljs.highlightElement(block);
-			});
+			// 2. Add copy buttons
+			try {
+				addCopyButtons(content);
+				addMessageCopyButtons(content);
+				addUserMessageCopyButtons(content);
+			} catch (e) {
+				console.error("Error adding copy buttons:", e);
+			}
 
-			// Render Math
-			renderMathInElement(content, {
-				delimiters: [
-					{ left: '$$', right: '$$', display: true },
-					{ left: '$', right: '$', display: false },
-					{ left: '\\(', right: '\\)', display: false },
-					{ left: '\\[', right: '\\]', display: true }
-				],
-				throwOnError: false
-			});
+			// 3. Highlight code
+			try {
+				content.querySelectorAll('pre code').forEach((block) => {
+					if (typeof hljs !== 'undefined') {
+						hljs.highlightElement(block);
+					}
+				});
+			} catch (e) {
+				console.error("Error highlighting code:", e);
+			}
 		});
 
 		// Listen for HTMX swaps to handle scrolling
 		document.body.addEventListener('htmx:afterSwap', function (evt) {
 			// Auto-scroll to bottom on new content
 			const chatWindow = document.getElementById('chat-window');
-			chatWindow.scrollTop = chatWindow.scrollHeight;
+			if (chatWindow) {
+				chatWindow.scrollTop = chatWindow.scrollHeight;
+			}
 		});
 
 		// Initial Math Render (if history loaded)
 		document.addEventListener("DOMContentLoaded", function () {
-			renderMathInElement(document.body, {
-				delimiters: [
-					{ left: '$$', right: '$$', display: true },
-					{ left: '$', right: '$', display: false },
-					{ left: '\\(', right: '\\)', display: false },
-					{ left: '\\[', right: '\\]', display: true }
-				],
-				throwOnError: false
-			});
+			renderMath(document.body, "initial");
 		});
 
 		// File Preview Logic
