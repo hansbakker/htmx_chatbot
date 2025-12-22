@@ -224,6 +224,7 @@ def init_db():
         # Enable WAL mode for better concurrency
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")  # 30 second busy timeout
+        conn.execute("PRAGMA foreign_keys = ON")
         
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -237,6 +238,7 @@ def init_db():
                 dark_mode INTEGER DEFAULT 1,
                 system_instruction TEXT,
                 selected_model TEXT DEFAULT 'gemini-2.5-flash',
+                coach_mode_enabled INTEGER DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -252,6 +254,10 @@ def init_db():
             pass
         try:
             conn.execute("ALTER TABLE users ADD COLUMN selected_model TEXT DEFAULT 'gemini-2.5-flash'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN coach_mode_enabled INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
 
@@ -316,6 +322,8 @@ def init_db():
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Workouts with CASCADE
         conn.execute("""
             CREATE TABLE IF NOT EXISTS workouts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -329,16 +337,52 @@ def init_db():
                 training_plan_days_id INTEGER,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(user_id) REFERENCES users(id),
-                FOREIGN KEY(training_plan_days_id) REFERENCES training_plan_days(id)
+                FOREIGN KEY(training_plan_days_id) REFERENCES training_plan_days(id) ON DELETE CASCADE
             )
         """)
         
-        # Migration: Add training_plan_days_id to workouts if it doesn't exist
-        try:
-            conn.execute("ALTER TABLE workouts ADD COLUMN training_plan_days_id INTEGER REFERENCES training_plan_days(id)")
-        except sqlite3.OperationalError:
-            pass
+        # User Memories table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+        """)
+
+        # Migration: Ensure updated_at exists if we ever change it later
+        # (Though not needed for a new table, it's good practice)
         
+        # Migration: Check if CASCADE exists in workouts OR if it's pointing to a renamed table (e.g. tpd_old)
+        cursor = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='workouts'")
+        row = cursor.fetchone()
+        if row and ("ON DELETE CASCADE" not in row[0] or "tpd_old" in row[0]):
+            print("Migrating workouts table for ON DELETE CASCADE and correct references...")
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute("ALTER TABLE workouts RENAME TO workouts_old")
+            conn.execute("""
+                CREATE TABLE workouts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    external_id TEXT UNIQUE,
+                    icu_event_id INTEGER,
+                    start_date_local TEXT,
+                    filename TEXT,
+                    file_contents TEXT,
+                    file_contents_confirmed TEXT,
+                    training_plan_days_id INTEGER,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id),
+                    FOREIGN KEY(training_plan_days_id) REFERENCES training_plan_days(id) ON DELETE CASCADE
+                )
+            """)
+            conn.execute("INSERT INTO workouts SELECT * FROM workouts_old")
+            conn.execute("DROP TABLE workouts_old")
+            conn.execute("PRAGMA foreign_keys = ON")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS training_plans (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -353,6 +397,7 @@ def init_db():
             )
         """)
 
+        # Weeks with CASCADE
         conn.execute("""
             CREATE TABLE IF NOT EXISTS training_plan_weeks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -361,10 +406,31 @@ def init_db():
                 phase TEXT,
                 focus TEXT,
                 total_volume_estimate TEXT,
-                FOREIGN KEY(plan_id) REFERENCES training_plans(id)
+                FOREIGN KEY(plan_id) REFERENCES training_plans(id) ON DELETE CASCADE
             )
         """)
+        
+        # Migration: Check if CASCADE exists in training_plan_weeks
+        cursor = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='training_plan_weeks'")
+        row = cursor.fetchone()
+        if row and "ON DELETE CASCADE" not in row[0]:
+            print("Migrating training_plan_weeks table for ON DELETE CASCADE...")
+            conn.execute("ALTER TABLE training_plan_weeks RENAME TO tpw_old")
+            conn.execute("""
+                CREATE TABLE training_plan_weeks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    plan_id INTEGER,
+                    week_number INTEGER,
+                    phase TEXT,
+                    focus TEXT,
+                    total_volume_estimate TEXT,
+                    FOREIGN KEY(plan_id) REFERENCES training_plans(id) ON DELETE CASCADE
+                )
+            """)
+            conn.execute("INSERT INTO training_plan_weeks SELECT * FROM tpw_old")
+            conn.execute("DROP TABLE tpw_old")
 
+        # Days with CASCADE
         conn.execute("""
             CREATE TABLE IF NOT EXISTS training_plan_days (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -377,9 +443,33 @@ def init_db():
                 intensity_factor REAL,
                 rpe INTEGER,
                 planned_date TEXT,
-                FOREIGN KEY(week_id) REFERENCES training_plan_weeks(id)
+                FOREIGN KEY(week_id) REFERENCES training_plan_weeks(id) ON DELETE CASCADE
             )
         """)
+        
+        # Migration: Check if CASCADE exists in training_plan_days
+        cursor = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='training_plan_days'")
+        row = cursor.fetchone()
+        if row and "ON DELETE CASCADE" not in row[0]:
+            print("Migrating training_plan_days table for ON DELETE CASCADE...")
+            conn.execute("ALTER TABLE training_plan_days RENAME TO tpd_old")
+            conn.execute("""
+                CREATE TABLE training_plan_days (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    week_id INTEGER,
+                    day_name TEXT,
+                    workout_type TEXT,
+                    details TEXT,
+                    minutes INTEGER,
+                    tss INTEGER,
+                    intensity_factor REAL,
+                    rpe INTEGER,
+                    planned_date TEXT,
+                    FOREIGN KEY(week_id) REFERENCES training_plan_weeks(id) ON DELETE CASCADE
+                )
+            """)
+            conn.execute("INSERT INTO training_plan_days SELECT * FROM tpd_old")
+            conn.execute("DROP TABLE tpd_old")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -488,13 +578,13 @@ def save_setting(key: str, value: str):
     try:
         with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
             conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-            conn.commit() # Commit the change
+        conn.commit() # Commit the change
     except Exception as e:
         print(f"Error saving setting {key}: {e}")
 
 def save_user_setting(user_id: int, key: str, value: any):
-    """Saves a user-specific setting (dark_mode, selected_model, system_instruction)."""
-    if key not in ['dark_mode', 'selected_model', 'system_instruction']:
+    """Saves a user-specific setting (dark_mode, selected_model, system_instruction, coach_mode_enabled)."""
+    if key not in ['dark_mode', 'selected_model', 'system_instruction', 'coach_mode_enabled']:
         print(f"Unknown user setting: {key}")
         return
         
@@ -510,10 +600,12 @@ def get_user_settings(user_id: int) -> dict:
     try:
         with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute("SELECT dark_mode, selected_model, system_instruction FROM users WHERE id = ?", (user_id,))
+            cursor = conn.execute("SELECT dark_mode, selected_model, system_instruction, coach_mode_enabled FROM users WHERE id = ?", (user_id,))
             row = cursor.fetchone()
             if row:
                 settings = dict(row)
+                # Convert INTEGER to bool for coach_mode_enabled
+                settings['coach_mode_enabled'] = bool(settings.get('coach_mode_enabled', 0))
                 # If instruction is empty, fallback to global
                 if not settings.get('system_instruction'):
                     settings['system_instruction'] = get_system_instruction(None)
@@ -525,8 +617,74 @@ def get_user_settings(user_id: int) -> dict:
     return {
         "dark_mode": 1,
         "selected_model": "gemini-2.5-flash",
-        "system_instruction": get_system_instruction(None)
+        "system_instruction": get_system_instruction(None),
+        "coach_mode_enabled": False
     }
+
+def add_user_memory(content: str):
+    """
+    Saves a persistent memory about the user. 
+    Use this when the user shares personal information, preferences, or explicitly asks you to remember something.
+    
+    Args:
+        content (str): The information to remember.
+    """
+    import sqlite3
+    session_id = session_id_ctx.get()
+    user_id = None
+    
+    try:
+        if session_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row[0]
+        
+        if not user_id:
+            return "Error: Could not determine user ID. Memory not saved."
+
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.execute("INSERT INTO user_memories (user_id, content) VALUES (?, ?)", (user_id, content))
+            conn.commit()
+            
+        return f"Successfully saved memory: {content}"
+    except Exception as e:
+        print(f"Error adding user memory: {e}")
+        return f"Error: {e}"
+
+def get_user_memories(user_id: int) -> List[Dict]:
+    """Retrieves all memories for a specific user."""
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT id, content, created_at FROM user_memories WHERE user_id = ? ORDER BY created_at DESC", (user_id,))
+            return [dict(row) for row in cursor.fetchall()]
+    except Exception as e:
+        print(f"Error fetching user memories: {e}")
+        return []
+
+def delete_user_memory(memory_id: int, user_id: int):
+    """Deletes a specific memory record."""
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.execute("DELETE FROM user_memories WHERE id = ? AND user_id = ?", (memory_id, user_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error deleting user memory: {e}")
+        return False
+
+def update_user_memory(memory_id: int, user_id: int, content: str):
+    """Updates the content of a specific memory record."""
+    try:
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.execute("UPDATE user_memories SET content = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?", (content, memory_id, user_id))
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"Error updating user memory: {e}")
+        return False
 
 @retry_on_db_lock()
 def get_history(session_id: str) -> List[Dict[str, str]]:
@@ -1972,92 +2130,56 @@ def list_workouts_from_db():
 def save_training_plan(plan_json: str):
     """
     Saves a hierarchical training plan to the database.
+    A user can only have one training plan at a time.
     
     Args:
         plan_json (str): The training plan as a JSON string.
     
     Example:
-    {
-    "training_plan": {
-        "name": "12-Week Polarized: Endurance & Peak Power (Weekly Detail)",
-        "goal": "Build deep aerobic base while maximizing neuromuscular power output.",
-        "methodology": "Polarized (80/20)",
-        "duration_weeks": 12,
-        "schedule": [
-            {
-                "week_number": 1,
-                "phase": "Phase 1: Base & Neuromuscular Activation",
-                "focus": "Introduction to Sprint Load",
-                "total_volume_estimate": "8-9 hours",
-                "days": [
-                    {
-                        "day": "Monday",
-                        "type": "Rest",
-                        "details": "Complete Rest",
-                        "minutes": 0,
-                        "TSS": 0,
-                        "IF": 0,
-                        "RPE": 0
-                    },
-                    {
-                        "day": "Tuesday",
-                        "type": "High Intensity",
-                        "details": "6 x 10s MAX Sprints (Torque focus). Rest 5m between.",
-                        "minutes": 60,
-                        "TSS": 0,
-                        "IF": 0,
-                        "RPE": 0
-                    },
-                    {
-                        "day": "Wednesday",
-                        "type": "Endurance",
-                        "details": "Zone 1 Steady.",
-                        "minutes": 90,
-                        "TSS": 0,
-                        "IF": 0,
-                        "RPE": 0
-                    },
-                    {
-                        "day": "Thursday",
-                        "type": "Endurance",
-                        "details": "Zone 1 + 3 x 1m High Cadence (110rpm).",
-                        "minutes": 60,
-                        "TSS": 0,
-                        "IF": 0,
-                        "RPE": 0
-                    },
-                    {
-                        "day": "Friday",
-                        "type": "Active Recovery",
-                        "details": "Coffee spin.",
-                        "minutes": 30,
-                        "TSS": 0,
-                        "IF": 0,
-                        "RPE": 0
-                    },
-                    {
-                        "day": "Saturday",
-                        "type": "High Intensity",
-                        "details": "4 x 4m @ 105% FTP. Rest 4m between.",
-                        "minutes": 90,
-                        "TSS": 0,
-                        "IF": 0,
-                        "RPE": 0
-                    },
-                    {
-                        "day": "Sunday",
-                        "type": "Long Endurance",
-                        "details": "Strict Zone 1.",
-                        "minutes": 150,
-                        "TSS": 0,
-                        "IF": 0,
-                        "RPE": 0
-                    }
-                ]
-            }
+{
+  "training_plan": {
+    "name": "12-Week Polarized: Endurance & Peak Power (Weekly Detail)",
+    "goal": "Build deep aerobic base while maximizing neuromuscular power output.",
+    "methodology": "Polarized (80/20)",
+    "duration_weeks": 12,
+    "schedule": [
+      {
+        "week_number": 1,
+        "phase": "Phase 1: Base & Neuromuscular Activation",
+        "focus": "Introduction to Sprint Load",
+        "total_volume_estimate": "8-9 hours",
+        "days": [
+          { "day": "Monday", "type": "Rest", "details": "Complete Rest", "minutes": 0, "TSS":0,"IF":0,"RPE":0 },
+          { "day": "Tuesday", "type": "High Intensity", "details": "6 x 10s MAX Sprints (Torque focus). Rest 5m between.", "minutes": 60,"TSS":0,"IF":0,"RPE":0 },
+          { "day": "Wednesday", "type": "Endurance", "details": "Zone 1 Steady.", "minutes": 90,"TSS":0,"IF":0,"RPE":0 },
+          { "day": "Thursday", "type": "Endurance", "details": "Zone 1 + 3 x 1m High Cadence (110rpm).", "minutes": 60,"TSS":0,"IF":0,"RPE":0},
+          { "day": "Friday", "type": "Active Recovery", "details": "Coffee spin.", "minutes": 30,"TSS":0,"IF":0,"RPE":0},
+          { "day": "Saturday", "type": "High Intensity", "details": "4 x 4m @ 105% FTP. Rest 4m between.", "minutes": 90,"TSS":0,"IF":0,"RPE":0},
+          { "day": "Sunday", "type": "Long Endurance", "details": "Strict Zone 1.", "minutes": 150,"TSS":0,"IF":0,"RPE":0}
         ]
-    }
-} 
+      },
+       {
+        "week_number": 2,
+        "phase": "Phase 1: Base & Neuromuscular Activation",
+        "focus": "Introduction to Sprint Load",
+        "total_volume_estimate": "8-9 hours",
+        "days": [
+          { "day": "Monday", "type": "Rest", "details": "Complete Rest", "minutes": 0, "TSS":0,"IF":0,"RPE":0 },
+          { "day": "Tuesday", "type": "High Intensity", "details": "6 x 10s MAX Sprints (Torque focus). Rest 5m between.", "minutes": 60,"TSS":0,"IF":0,"RPE":0 },
+          { "day": "Wednesday", "type": "Endurance", "details": "Zone 1 Steady.", "minutes": 90,"TSS":0,"IF":0,"RPE":0 },
+          { "day": "Thursday", "type": "Endurance", "details": "Zone 1 + 3 x 1m High Cadence (110rpm).", "minutes": 60,"TSS":0,"IF":0,"RPE":0},
+          { "day": "Friday", "type": "Active Recovery", "details": "Coffee spin.", "minutes": 30,"TSS":0,"IF":0,"RPE":0},
+          { "day": "Saturday", "type": "High Intensity", "details": "4 x 4m @ 105% FTP. Rest 4m between.", "minutes": 90,"TSS":0,"IF":0,"RPE":0},
+          { "day": "Sunday", "type": "Long Endurance", "details": "Strict Zone 1.", "minutes": 150,"TSS":0,"IF":0,"RPE":0}
+        ]
+      ,
+       {
+        "week_number": 3,
+        
+        etcetera
+    ]
+  }
+}
     Returns:
         str: Success message or error.
     """
@@ -2077,6 +2199,12 @@ def save_training_plan(plan_json: str):
                 if row:
                     user_id = row[0]
         
+        # 1b. Check for existing plan
+        if user_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                cursor = conn.execute("SELECT id FROM training_plans WHERE user_id = ?", (user_id,))
+                if cursor.fetchone():
+                    return "Error: You already have an active training plan. Impossible to create a new one."
         # 2. Parse JSON
         data = json.loads(plan_json)
         # Handle cases where the input is wrapped in markdown or is already a dict
@@ -2148,6 +2276,108 @@ def save_training_plan(plan_json: str):
 
     except Exception as e:
         print(f"Error in save_training_plan: {str(e)}")
+        return f"Error: {str(e)}"
+
+def modify_training_plan_start_date(plan_id: int, new_start_date: str):
+    """
+    Modifies the start date of an existing training plan and updates all associated workout dates.
+    
+    Args:
+        plan_id (int): The ID of the training plan to modify.
+        new_start_date (str): The new start date in ISO format (e.g., "2024-03-30").
+        
+    Returns:
+        str: Success message or error.
+    """
+    import sqlite3
+    from datetime import datetime, timedelta
+    
+    try:
+        new_start_dt = datetime.fromisoformat(new_start_date.split('T')[0])
+        day_map = {
+            "Monday": 0, "Tuesday": 1, "Wednesday": 2, "Thursday": 3,
+            "Friday": 4, "Saturday": 5, "Sunday": 6
+        }
+        
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            
+            # 1. Verify plan exists
+            cursor = conn.execute("SELECT name FROM training_plans WHERE id = ?", (plan_id,))
+            plan = cursor.fetchone()
+            if not plan:
+                return f"Error: Training plan with ID {plan_id} not found."
+            
+            # 2. Update training_plans table
+            conn.execute("UPDATE training_plans SET start_date = ? WHERE id = ?", (new_start_date, plan_id))
+            
+            # 3. Update all associated days
+            # Join training_plan_days and training_plan_weeks to get week_number and day_name
+            cursor = conn.execute("""
+                SELECT d.id, d.day_name, w.week_number 
+                FROM training_plan_days d
+                JOIN training_plan_weeks w ON d.week_id = w.id
+                WHERE w.plan_id = ?
+            """, (plan_id,))
+            
+            updates = []
+            for row in cursor.fetchall():
+                day_id = row['id']
+                day_name = row['day_name']
+                week_number = row['week_number']
+                
+                # Recalculate planned_date
+                day_offset = day_map.get(day_name, 0)
+                planned_date = (new_start_dt + timedelta(weeks=(week_number-1), days=day_offset)).strftime("%Y-%m-%d")
+                updates.append((planned_date, day_id))
+            
+            # Batch update dates
+            conn.executemany("UPDATE training_plan_days SET planned_date = ? WHERE id = ?", updates)
+            
+            conn.commit()
+            
+        return f"Success: Training plan '{plan['name']}' updated with new start date {new_start_date}."
+        
+    except Exception as e:
+        print(f"Error in modify_training_plan_start_date: {str(e)}")
+        return f"Error: {str(e)}"
+
+def delete_training_plan():
+    """
+    Deletes the current user's training plan and all associated weeks, days, and workouts.
+    
+    Returns:
+        str: Success message or error.
+    """
+    import sqlite3
+    
+    session_id = session_id_ctx.get()
+    user_id = None
+    
+    try:
+        # 1. Resolve user_id
+        if session_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row[0]
+        
+        if not user_id:
+            return "Error: Could not determine user ID from session. Please make sure you are logged in."
+
+        # 2. Delete the plan
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.execute("PRAGMA foreign_keys = ON")
+            cursor = conn.execute("DELETE FROM training_plans WHERE user_id = ?", (user_id,))
+            if cursor.rowcount == 0:
+                return "Error: No active training plan found for your user."
+            conn.commit()
+            
+        return "Success: Your training plan and all associated data have been deleted."
+        
+    except Exception as e:
+        print(f"Error in delete_training_plan: {str(e)}")
         return f"Error: {str(e)}"
 
 def get_training_plan_week(plan_id: int, week_number: int):
@@ -3433,6 +3663,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
     # Fetch user settings if logged in
     user_settings = None
     user_id = None
+    coach_mode_enabled = False # Default
     if session_id:
         with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
             cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
@@ -3440,7 +3671,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             if row:
                 user_id = row[0]
                 user_settings = get_user_settings(user_id)
-
+                if user_settings:
+                    coach_mode_enabled = user_settings.get('coach_mode_enabled', False)
     # Fallback/Override logic
     if selected_model is None:
         selected_model = user_settings['selected_model'] if user_settings else get_setting("selected_model", "gemini-2.5-flash")
@@ -3542,6 +3774,13 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             current_instruction = get_system_instruction(user_id) # Start with base instruction
             has_file_in_context = uploaded_file is not None # Check if file was uploaded in this turn
             current_instruction += f"\n\n{get_current_datetime()}" 
+            
+            # Inject User Memories
+            if user_id:
+                memories = get_user_memories(user_id)
+                if memories:
+                    memories_text = "\n".join([f"- {m['content']}" for m in memories])
+                    current_instruction += f"\n\n### User Memories (Long-term Context)\nThese are things you've learned about the user in the past:\n{memories_text}"
             
             # Check logic:
             # If we represent a "Vision" turn (uploading image/video), we disable tools and keep history (Context).
@@ -3699,43 +3938,172 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 current_instruction += """\n\n- You have access to a 'get_precipitation_timing' tool. 
                 - Use it when the user asks 'when will it rain?', 'when will it stop raining?', or needs precipitation timing information."""
 
-                tools.append(upload_workout_to_intervals)
-                current_instruction += """\n\n- You have access to an 'upload_workout_to_intervals' tool. 
-                - Use it when the user wants to create and schedule a actual workout based on the training plan
-                 and upload the workout file (.zwo format) for a specific date to Intervals.icu. 
-                - You need to provide the start_date_local (ISO format), filename, and the raw text contents of the workout file."""
+                if coach_mode_enabled:
 
-                tools.append(delete_workout_from_intervals)
-                current_instruction += """\n\n- You have access to a 'delete_workout_from_intervals' tool. 
-                - Use it when the user wants to delete a workout(s) from Intervals.icu calendar. 
-                - You need to provide the start_date (e.g., '2024-03-30'). The tool will search for the workout(s) in the local database by this date and delete all the workouts on that date from both Intervals.icu and the local database."""
+                    current_instruction += """\n\n- you are an experienced cycling performance specialist and coach. I want you to help me create a balanced training plan. 
+You need to ask me (interactively) questions so you have enough information to create the plan.
+Plans have a maximum duration of 13 weeks.
+I want the output structured like this EXAMPLE:
+{
+  "training_plan": {
+    "name": "12-Week Polarized: Endurance & Peak Power (Weekly Detail)",
+    "goal": "Build deep aerobic base while maximizing neuromuscular power output.",
+    "methodology": "Polarized (80/20)",
+    "duration_weeks": 12,
+    "schedule": [
+      {
+        "week_number": 1,
+        "phase": "Phase 1: Base & Neuromuscular Activation",
+        "focus": "Introduction to Sprint Load",
+        "total_volume_estimate": "8-9 hours",
+        "days": [
+          { "day": "Monday", "type": "Rest", "details": "Complete Rest", "minutes": 0, "TSS":0,"IF":0,"RPE":0 },
+          { "day": "Tuesday", "type": "High Intensity", "details": "6 x 10s MAX Sprints (Torque focus). Rest 5m between.", "minutes": 60,"TSS":0,"IF":0,"RPE":0 },
+          { "day": "Wednesday", "type": "Endurance", "details": "Zone 1 Steady.", "minutes": 90,"TSS":0,"IF":0,"RPE":0 },
+          { "day": "Thursday", "type": "Endurance", "details": "Zone 1 + 3 x 1m High Cadence (110rpm).", "minutes": 60,"TSS":0,"IF":0,"RPE":0},
+          { "day": "Friday", "type": "Active Recovery", "details": "Coffee spin.", "minutes": 30,"TSS":0,"IF":0,"RPE":0},
+          { "day": "Saturday", "type": "High Intensity", "details": "4 x 4m @ 105% FTP. Rest 4m between.", "minutes": 90,"TSS":0,"IF":0,"RPE":0},
+          { "day": "Sunday", "type": "Long Endurance", "details": "Strict Zone 1.", "minutes": 150,"TSS":0,"IF":0,"RPE":0}
+        ]
+      },
+       {
+        "week_number": 2,
+        "phase": "Phase 1: Base & Neuromuscular Activation",
+        "focus": "Introduction to Sprint Load",
+        "total_volume_estimate": "8-9 hours",
+        "days": [
+          { "day": "Monday", "type": "Rest", "details": "Complete Rest", "minutes": 0, "TSS":0,"IF":0,"RPE":0 },
+          { "day": "Tuesday", "type": "High Intensity", "details": "6 x 10s MAX Sprints (Torque focus). Rest 5m between.", "minutes": 60,"TSS":0,"IF":0,"RPE":0 },
+          { "day": "Wednesday", "type": "Endurance", "details": "Zone 1 Steady.", "minutes": 90,"TSS":0,"IF":0,"RPE":0 },
+          { "day": "Thursday", "type": "Endurance", "details": "Zone 1 + 3 x 1m High Cadence (110rpm).", "minutes": 60,"TSS":0,"IF":0,"RPE":0},
+          { "day": "Friday", "type": "Active Recovery", "details": "Coffee spin.", "minutes": 30,"TSS":0,"IF":0,"RPE":0},
+          { "day": "Saturday", "type": "High Intensity", "details": "4 x 4m @ 105% FTP. Rest 4m between.", "minutes": 90,"TSS":0,"IF":0,"RPE":0},
+          { "day": "Sunday", "type": "Long Endurance", "details": "Strict Zone 1.", "minutes": 150,"TSS":0,"IF":0,"RPE":0}
+        ]
+      ,
+       {
+        "week_number": 3,
+        
+        etcetera
+    ]
+  }
+}
+TRAINING PLAN DESIGN 
 
-                tools.append(get_workout_from_intervals)
-                current_instruction += """\n\n- You have access to a 'get_workout_from_intervals' tool. 
-                - Use it when the user wants to retrieve full details of a workout from Intervals.icu calendar for a specific date. 
-                - Provide the workout start_date (e.g., '2024-03-30')."""
+To create a professional-grade, physiologically sound training plan, a coach needs to understand the athlete's starting point (biology), destination (goals), and constraints (logistics).
+Here is the comprehensive list of questions an athlete should answer, categorized by their impact on the plan:
+1. Current Fitness & Baseline Metrics
+These determine the intensity "floor" and "ceiling" of the plan.
+*   What is your current FTP (Functional Threshold Power) in Watts?
+*   What is your current weight in kg?
+*   What is your age?
+*   What is your Max Heart Rate and Resting Heart Rate?
+*   What are your Power Duration personal bests (e.g., your best 5-second, 1-minute, 5-minute, and 20-minute power)?
+2. Training History & "Chronic" Load
+These determine how much stress (TSS) you can handle without injury.
+*   What has been your average weekly volume (hours and/or distance) over the last 3 months?
+*   What is your experience level with Structured Training (using ERG mode, intervals, or specific power zones)?
 
-                tools.append(list_workouts_from_db)
-                current_instruction += """\n\n- You have access to a 'list_workouts_from_db' tool. 
-                - Use it to list all workouts currently stored in the local database for the user. 
-                - It provides a summary (external_id, start_date_local, filename) and indicates if the workout is already confirmed in the external Intervals.icu calendar."""
+3. The "A-Race" or Primary Goal
+This determines the "Specialty" phase and the timing of the taper.
+*	When does the plan has to start?
+*   What is the date of your main event or if no main event, until when the plan needs to run?
+*   What is the nature of the event? (Road race, Crit, Century, Hilly Gran Fondo, Gravel, or Time Trial? or something else)
+*	What is the name and/or location of the event/race? This can be used to search the web for more information IF NEEDED
+*   What is the terrain profile? (Flat, rolling hills, or long alpine-style climbs?)
+* 	What is the elevation that is covered?
+*   What are the technical demands? (Technical descending, unpaved sectors, or group riding/drafting?)
+4. Logistics & Weekly Availability
+This determines the structure of your weekly calendar.
+*   What is the absolute maximum hours you can train in a "Peak" week?
+*   Which day of the week is best for your Long Ride?
+*   Which two weekdays are best for High-Intensity sessions?
+*   Which days must be total Rest Days due to work or family commitments?
+5. Equipment & Environment
+This determines how the workouts are designed (Power vs. HR).
+*   Do you have a Power Meter on your outdoor bike?
+*   Do you use a Smart Trainer (for ERG mode) for indoor sessions?
+*   Do you have access to climbing terrain outdoors, or will you simulate hills on the trainer?
+6. Health & Physiology
+This determines the recovery rate and nutrition strategy.
+*   What is your age? (Crucial for determining recovery duration and the frequency of rest weeks).
+*   Do you have any current or chronic injuries (e.g., knee, back, or hip issues)?
+*   Do you incorporate Strength/Resistance training? (If so, on which days?)
+*   What is your current nutrition and hydration strategy for rides over 3 hours?
 
-                tools.append(save_training_plan)
-                current_instruction += """\n\n- You have access to a 'save_training_plan' tool. 
-                - Use it to save a structured training plan (JSON) to the database. 
-                - The input should be a valid JSON string representing the training plan."""
+If an athlete provides this data, you can calculate a CTL (Fitness) Ramp Rate that is aggressive enough to ensure peak performance but conservative enough to avoid the "Overreach Zone."	
+*   **Testing:** FTP Tests scheduled at the end of every recovery week (e.g., Week 4, 8) to recalibrate zones.
 
-                tools.append(get_training_plan_summary)
-                current_instruction += """\n\n- You have access to a 'get_training_plan_summary' tool. 
-                - Use it to list all available training plans or get the high-level details of a specific plan."""
 
-                tools.append(get_training_plan_week)
-                current_instruction += """\n\n- You have access to a 'get_training_plan_week' tool. 
-                - Use it to retrieve the full workout schedule for a specific week of a training plan."""
+Workout Design Rules
+*   **Endurance Rides (Z2):** **"Less Boring" protocol.** Never use flat lines for long durations. Use varied blocks (e.g., oscillating between 60-70% FTP every 10-15 mins) to maintain engagement.
+*   **Sprint Execution:** Sprints are High Torque/Neuromuscular.
 
-                tools.append(query_training_plan_stats)
-                current_instruction += """\n\n- You have access to a 'query_training_plan_stats' tool. 
-                - Use it to calculate total TSS, minutes, and other statistics for a training plan within a date range."""
+Technical Specifications for the workout .zwo Files (Critical)
+*   **Generation of file: ONLY when requested
+*   **Compatibility:** Optimized for older Wahoo Head Units (Elemnt/Bolt).
+*   **Naming Convention:** `W[##]_[Day]_[Name].zwo` (e.g., `W03_Tue_MaxTorque.zwo`) for easy file sorting.
+*   **NO Ramps/Slopes:**
+    *   Do **NOT** use `<Ramp>`, `<Warmup>`, or `<Cooldown>` tags with power ranges.
+    *   **SOLUTION:** Use **"Stepped" Blocks**. Break warmups/cooldowns into multiple fixed `<SteadyState>` segments (e.g., 3x 3min steps increasing in power).
+*   **NO FreeRide Segments:**
+    *   Do **NOT** use `<FreeRide>` tags for intervals.
+    *   **SOLUTION:** Use **High-Power `<SteadyState>`** (e.g., `Power="2.0"` or `Power="3.0"`) for sprints.
+*   **Delivery:** if download is requested, always bundle files into **ZIP** archives when there's more then 1.
+
+
+"""
+                    tools.append(upload_workout_to_intervals)
+                    current_instruction += """\n\n- You have access to an 'upload_workout_to_intervals' tool. 
+                    - Use it when the user wants to create and schedule a actual workout based on the training plan
+                     and upload the workout file (.zwo format) for a specific date to Intervals.icu. 
+                    - You need to provide the start_date_local (ISO format), filename, and the raw text contents of the workout file."""
+
+                    tools.append(delete_workout_from_intervals)
+                    current_instruction += """\n\n- You have access to a 'delete_workout_from_intervals' tool. 
+                    - Use it when the user wants to delete a workout(s) from Intervals.icu calendar. 
+                    - You need to provide the start_date (e.g., '2024-03-30'). The tool will search for the workout(s) in the local database by this date and delete all the workouts on that date from both Intervals.icu and the local database."""
+
+                    tools.append(get_workout_from_intervals)
+                    current_instruction += """\n\n- You have access to a 'get_workout_from_intervals' tool. 
+                    - Use it when the user wants to retrieve full details of a workout from Intervals.icu calendar for a specific date. 
+                    - Provide the workout start_date (e.g., '2024-03-30')."""
+
+                    tools.append(list_workouts_from_db)
+                    current_instruction += """\n\n- You have access to a 'list_workouts_from_db' tool. 
+                    - Use it to list all workouts currently stored in the local database for the user. 
+                    - It provides a summary (external_id, start_date_local, filename) and indicates if the workout is already confirmed in the external Intervals.icu calendar."""
+
+                    tools.append(save_training_plan)
+                    current_instruction += """\n\n- You have access to a 'save_training_plan' tool. 
+                    - Use it to save a structured training plan (JSON) to the database. 
+                    - IMPORTANT: A user can only have ONE active training plan. If one exists, this tool will return an error.
+                    - The input should be a valid JSON string representing the training plan."""
+
+                    tools.append(delete_training_plan)
+                    current_instruction += """\n\n- You have access to a 'delete_training_plan' tool. 
+                    - Use it when the user wants to remove their entire current training plan and all associated workouts."""
+
+                    tools.append(get_training_plan_summary)
+                    current_instruction += """\n\n- You have access to a 'get_training_plan_summary' tool. 
+                    - Use it to list all available training plans or get the high-level details of a specific plan."""
+
+                    tools.append(get_training_plan_week)
+                    current_instruction += """\n\n- You have access to a 'get_training_plan_week' tool. 
+                    - Use it to retrieve the full workout schedule for a specific week of a training plan."""
+
+                    tools.append(modify_training_plan_start_date)
+                    current_instruction += """\n\n- You have access to a 'modify_training_plan_start_date' tool. 
+                    - Use it when the user wants to shift the start date of an existing training plan and update all daily workout dates."""
+
+                    tools.append(query_training_plan_stats)
+                    current_instruction += """\n\n- You have access to a 'query_training_plan_stats' tool. 
+                    - Use it to calculate total TSS, minutes, and other statistics for a training plan within a date range."""
+
+                tools.append(add_user_memory)
+                current_instruction += """\n\n- You have access to an 'add_user_memory' tool. 
+                - Use it to save important information, preferences, or facts about the user that should persist across chat sessions.
+                - Only save information that is actually useful for long-term context."""
             else:
                 # When files are present, clear history to avoid API compatibility issues
                 # Keep only the current message (last one in payload)
@@ -3750,6 +4118,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             append them to the very end of your response as a JSON object with the key 'suggestions', 
             -DO NOT wrap this JSON object in markdown code blocks. Doing so will is a FAILURE.
             -like this: {"suggestions": ["Action 1", "Action 2"]}. 
+            -offer specific follow up actions, no general suggestions like "Would you like to know anything else?" 
             -Formulate the suggestions in a way that the user can directly execute them, not as a question to the user, such as "would you like to...".
             -Make sure it is the very last thing in your response.
             
@@ -3953,6 +4322,8 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                 api_response = get_precipitation_timing(fn_args.get("location"))
                             elif fn_name == "wolfram_alpha_query":
                                 api_response = wolfram_alpha_query(fn_args.get("query"))
+                            elif fn_name == "add_user_memory":
+                                api_response = add_user_memory(fn_args.get("content"))
                             elif fn_name == "upload_workout_to_intervals":
                                 api_response = upload_workout_to_intervals(fn_args.get("start_date_local"), fn_args.get("filename"), fn_args.get("workout_file_content"), fn_args.get("training_plan_days_id"))
                             elif fn_name == "delete_workout_from_intervals":
@@ -3963,12 +4334,16 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                                 api_response = list_workouts_from_db()
                             elif fn_name == "save_training_plan":
                                 api_response = save_training_plan(fn_args.get("plan_json"))
+                            elif fn_name == "delete_training_plan":
+                                api_response = delete_training_plan()
                             elif fn_name == "get_training_plan_summary":
                                 api_response = get_training_plan_summary(fn_args.get("plan_id"))
                             elif fn_name == "get_training_plan_week":
                                 api_response = get_training_plan_week(fn_args.get("plan_id"), fn_args.get("week_number"))
                             elif fn_name == "query_training_plan_stats":
                                 api_response = query_training_plan_stats(fn_args.get("plan_id"), fn_args.get("start_date"), fn_args.get("end_date"))
+                            elif fn_name == "modify_training_plan_start_date":
+                                api_response = modify_training_plan_start_date(fn_args.get("plan_id"), fn_args.get("new_start_date"))
                             else:
                                 api_response = f"Error: Unknown tool '{fn_name}'"
                                 
@@ -4425,8 +4800,9 @@ async def get_system_instruction_ui(user_id: int = Depends(get_current_user_id))
                 <div class="flex h-full">
                     <!-- Sidebar -->
                     <div class="w-48 bg-gray-50 dark:bg-gray-900/50 border-r border-gray-100 dark:border-gray-700 p-2 space-y-1">
-                        <button onclick="showTab('general')" class="w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300">General</button>
-                        <button hx-get="/archived-chats" hx-target="#archived-list" onclick="showTab('archived')" class="w-full text-left px-3 py-2 rounded-lg text-sm font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">Archived Chats</button>
+                        <button onclick="showTab('general')" class="tab-btn w-full text-left px-3 py-2 rounded-lg text-sm font-medium bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300" data-tab="general">General</button>
+                        <button hx-get="/memories" hx-target="#memories-list" onclick="showTab('memories')" class="tab-btn w-full text-left px-3 py-2 rounded-lg text-sm font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors" data-tab="memories">Memories</button>
+                        <button hx-get="/archived-chats" hx-target="#archived-list" onclick="showTab('archived')" class="tab-btn w-full text-left px-3 py-2 rounded-lg text-sm font-medium text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors" data-tab="archived">Archived Chats</button>
                     </div>
                     
                     <!-- Content -->
@@ -4435,6 +4811,17 @@ async def get_system_instruction_ui(user_id: int = Depends(get_current_user_id))
                         <div id="tab-general" class="space-y-6">
                             <form hx-post="/settings/system_instruction" hx-swap="beforeend" hx-target="body">
                                 <div class="space-y-4">
+                                    <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
+                                        <div class="flex flex-col">
+                                            <span class="font-medium text-gray-900 dark:text-gray-300">Coach Mode</span>
+                                            <span class="text-xs text-gray-500 dark:text-gray-400">Enable advanced cycling coach instructions</span>
+                                        </div>
+                                        <label class="relative inline-flex items-center cursor-pointer">
+                                            <input type="checkbox" name="coach_mode_enabled" value="true" {"checked" if user_settings.get('coach_mode_enabled') else ""} class="sr-only peer">
+                                            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+                                        </label>
+                                    </div>
+
                                     <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
                                         <div class="flex flex-col">
                                             <span class="font-medium text-gray-900 dark:text-gray-300">Dark Mode</span>
@@ -4495,6 +4882,23 @@ async def get_system_instruction_ui(user_id: int = Depends(get_current_user_id))
                                 </div>
                             </form>
                         </div>
+
+                        <!-- Memories Tab -->
+                        <div id="tab-memories" class="hidden h-full flex flex-col">
+                             <div class="flex justify-between items-center mb-4">
+                                <h3 class="text-sm font-semibold text-gray-500 uppercase tracking-wider">User Memories</h3>
+                                <span class="text-[10px] text-gray-400">AI learns these automatically</span>
+                             </div>
+                             <div id="memories-list" class="flex-1 overflow-y-auto pr-2">
+                                <div class="flex items-center justify-center h-40 text-gray-400">
+                                    <svg class="animate-spin h-5 w-5 mr-3" viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    Loading...
+                                </div>
+                             </div>
+                        </div>
                         
                         <!-- Archived Chats Tab -->
                         <div id="tab-archived" class="hidden h-full flex flex-col">
@@ -4515,9 +4919,25 @@ async def get_system_instruction_ui(user_id: int = Depends(get_current_user_id))
             
             <script>
                 function showTab(tabName) {{
+                    // Hide all tabs
                     document.getElementById('tab-general').classList.add('hidden');
                     document.getElementById('tab-archived').classList.add('hidden');
+                    document.getElementById('tab-memories').classList.add('hidden');
+                    
+                    // Show target tab
                     document.getElementById('tab-' + tabName).classList.remove('hidden');
+
+                    // Update button styles
+                    const buttons = document.querySelectorAll('.tab-btn');
+                    buttons.forEach(btn => {{
+                        if (btn.getAttribute('data-tab') === tabName) {{
+                            btn.classList.add('bg-blue-50', 'dark:bg-blue-900/20', 'text-blue-700', 'dark:text-blue-300');
+                            btn.classList.remove('text-gray-600', 'dark:text-gray-400', 'hover:bg-gray-100', 'dark:hover:bg-gray-800');
+                        }} else {{
+                            btn.classList.remove('bg-blue-50', 'dark:bg-blue-900/20', 'text-blue-700', 'dark:text-blue-300');
+                            btn.classList.add('text-gray-600', 'dark:text-gray-400', 'hover:bg-gray-100', 'dark:hover:bg-gray-800');
+                        }}
+                    }});
                 }}
             </script>
         </div>
@@ -4530,6 +4950,7 @@ async def post_system_instruction(
     model: str = Form(...), 
     execution_mode: str = Form(None), 
     e2b_timeout: int = Form(300),
+    coach_mode_enabled: str = Form(None),
     user_id: int = Depends(get_current_user_id)
 ):
     if isinstance(user_id, Response): return user_id
@@ -4537,6 +4958,7 @@ async def post_system_instruction(
     # Save to User table
     save_user_setting(user_id, 'selected_model', model)
     save_user_setting(user_id, 'system_instruction', instruction)
+    save_user_setting(user_id, 'coach_mode_enabled', 1 if coach_mode_enabled == 'true' else 0)
 
     response = Response(content="""
     <div id="settings-modal" class="fixed inset-0 z-50 flex items-end justify-center p-4 pointer-events-none">
@@ -4567,3 +4989,60 @@ async def post_system_instruction(
     save_setting("e2b_timeout", str(e2b_timeout))
     
     return response
+@app.get("/memories", response_class=HTMLResponse)
+async def get_memories_ui(user_id: int = Depends(get_current_user_id)):
+    if isinstance(user_id, Response): return user_id
+    
+    memories = get_user_memories(user_id)
+    html = '<div class="space-y-4">'
+    
+    if not memories:
+        html += '<p class="text-gray-500 dark:text-gray-400 text-sm italic">No memories saved yet. Talk to the AI to save personal preferences!</p>'
+    else:
+        for m in memories:
+            html += f"""
+            <div id="memory-{m['id']}" class="p-3 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 group relative transition-all hover:border-blue-300">
+                <div class="flex justify-between items-start gap-4">
+                    <div class="flex-1">
+                        <textarea class="w-full bg-transparent border-none focus:ring-0 text-sm text-gray-800 dark:text-gray-200 resize-none p-0 overflow-hidden" 
+                                  name="content"
+                                  hx-post="/save-memory/{m['id']}"
+                                  hx-trigger="keyup changed delay:500ms"
+                                  oninput="this.style.height = ''; this.style.height = this.scrollHeight + 'px'"
+                                  rows="1">{m['content']}</textarea>
+                        <span class="text-[10px] text-gray-400 dark:text-gray-500 mt-1 block">Saved on {m['created_at']}</span>
+                    </div>
+                    <button hx-delete="/delete-memory/{m['id']}" 
+                            hx-target="#memory-{m['id']}" 
+                            hx-swap="outerHTML"
+                            hx-confirm="Are you sure you want to delete this memory?"
+                            class="text-gray-400 hover:text-red-500 transition-colors md:opacity-0 group-hover:opacity-100 p-1">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            """
+    html += '</div>'
+    html += """
+    <script>
+        document.querySelectorAll('#memories-list textarea').forEach(el => {
+            el.style.height = el.scrollHeight + 'px';
+        });
+    </script>
+    """
+    return html
+
+@app.post("/save-memory/{memory_id}")
+async def post_save_memory(memory_id: int, content: str = Form(...), user_id: int = Depends(get_current_user_id)):
+    if isinstance(user_id, Response): return user_id
+    update_user_memory(memory_id, user_id, content)
+    return Response(content="Saved", status_code=200)
+
+@app.delete("/delete-memory/{memory_id}")
+async def post_delete_memory(memory_id: int, user_id: int = Depends(get_current_user_id)):
+    if isinstance(user_id, Response): return user_id
+    if delete_user_memory(memory_id, user_id):
+        return ""
+    raise HTTPException(status_code=500, detail="Failed to delete memory")
