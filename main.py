@@ -3962,7 +3962,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 - GUIDELINES:
                 - Convert inputs to simplified keyword queries (e.g. "France population" instead of "how many people live in France").
                 - Send queries in English only.
-                - Use proper Markdown for math formulas: '$$...$$' for block formulas, and '\(... \)' for inline formulas.
+                - Use proper Markdown for math formulas: '$$...$$' for block formulas
                 - Use named physical constants (e.g., 'speed of light') without numerical substitution.
                 - Include a space between compound units (e.g., "m Ω" instead of "mΩ").
                 - If data for multiple properties is needed, make separate calls for each property.
@@ -3997,7 +3997,12 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 tools.append(get_precipitation_timing)
                 current_instruction += """\n\n- You have access to a 'get_precipitation_timing' tool. 
                 - Use it when the user asks 'when will it rain?', 'when will it stop raining?', or needs precipitation timing information."""
-
+                
+                tools.append(add_user_memory)
+                current_instruction += """\n\n- You have access to an 'add_user_memory' tool. 
+                - Use it to save important information, preferences, or facts about the user that should persist across chat sessions.
+                - Only save information that is actually useful for long-term context."""
+                
                 if coach_mode_enabled:
 
                     current_instruction += """\n\n- you are an experienced cycling performance specialist and coach. I want you to help me create a balanced training plan. 
@@ -4059,11 +4064,13 @@ These determine the intensity "floor" and "ceiling" of the plan.
 *   What is your age?
 *   What is your Max Heart Rate and Resting Heart Rate?
 *   What are your Power Duration personal bests (e.g., your best 5-second, 1-minute, 5-minute, and 20-minute power)?
-2. Training History & "Chronic" Load
-These determine how much stress (TSS) you can handle without injury.
-*   What has been your average weekly volume (hours and/or distance) over the last 3 months?
-*   What is your experience level with Structured Training (using ERG mode, intervals, or specific power zones)?
-
+2.Training History & Starting CTL (Fitness Baseline) 
+*   This is critical for calculating the Start Value of the Performance Management Chart (PMC). * 
+*   Exact Metric: Do you know your current CTL (Chronic Training Load) or "Fitness" score from Intervals.icu, TrainingPeaks, or WKO5? (If yes, provide the number). 
+*   Estimation Data (If CTL is unknown): What has been your average **weekly hours** over the past 6 weeks? 
+*   What is your estimated average **weekly TSS** (Training Stress Score) over the past 6 weeks? 
+*   How would you describe the **intensity** of your recent riding? (e.g., "Strict Zone 2 only," "Hard group rides," "Mixed riding," or "Totally off the bike"). 
+*   Experience: What is your experience level with Structured Training (using ERG mode, intervals, or specific power zones)?
 3. The "A-Race" or Primary Goal
 This determines the "Specialty" phase and the timing of the taper.
 *	When does the plan has to start?
@@ -4160,10 +4167,7 @@ Technical Specifications for the workout .zwo Files (Critical)
                     current_instruction += """\n\n- You have access to a 'query_training_plan_stats' tool. 
                     - Use it to calculate total TSS, minutes, and other statistics for a training plan within a date range."""
 
-                tools.append(add_user_memory)
-                current_instruction += """\n\n- You have access to an 'add_user_memory' tool. 
-                - Use it to save important information, preferences, or facts about the user that should persist across chat sessions.
-                - Only save information that is actually useful for long-term context."""
+                
             else:
                 # When files are present, clear history to avoid API compatibility issues
                 # Keep only the current message (last one in payload)
