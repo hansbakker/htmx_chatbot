@@ -17,3 +17,4 @@ xhtml2pdf
 authlib
 itsdangerous
 httpx
+pandas
