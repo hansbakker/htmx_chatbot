@@ -3833,7 +3833,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
             tools = []
             current_instruction = get_system_instruction(user_id) # Start with base instruction
             has_file_in_context = uploaded_file is not None # Check if file was uploaded in this turn
-            current_instruction += f"\n\n{get_current_datetime()}" 
+            current_instruction += f"\n\n{get_current_datetime()}, use this for the duration of this turn" 
             
             # Inject User Memories
             if user_id:

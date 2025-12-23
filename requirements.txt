@@ -18,3 +18,4 @@ authlib
 itsdangerous
 httpx
 pandas
+e2b_code_interpreter
