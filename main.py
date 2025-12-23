@@ -35,7 +35,8 @@ from fastapi import FastAPI, Request, Form, Response, Cookie, File, UploadFile, 
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from google.api_core.exceptions import ResourceExhausted
 
 # Custom Providers
@@ -708,35 +709,46 @@ def get_history(session_id: str) -> List[Dict[str, str]]:
         if content.strip().startswith("{"):
             try:
                 data = json.loads(content)
-                if "function_call" in data:
-                    # Reconstruct FunctionCall part
-                    fc_data = data["function_call"]
-                    parts.append(
-                        genai.protos.Part(
-                            function_call=genai.protos.FunctionCall(
-                                name=fc_data["name"],
-                                args=fc_data["args"]
+                tool_calls = data.get("function_call")
+                tool_responses = data.get("function_response")
+                if tool_calls or tool_responses:
+                    if tool_calls:
+                        if not isinstance(tool_calls, list):
+                            tool_calls = [tool_calls]
+                        for tc in tool_calls:
+                            parts.append(
+                                types.Part(
+                                    function_call=types.FunctionCall(
+                                        name=tc['name'],
+                                        args=tc['args']
+                                    )
+                                )
                             )
-                        )
-                    )
-                elif "function_response" in data:
-                    # Reconstruct FunctionResponse part
-                    fr_data = data["function_response"]
-                    parts.append(
-                        genai.protos.Part(
-                            function_response=genai.protos.FunctionResponse(
-                                name=fr_data["name"],
-                                response=fr_data["response"]
+                    
+                    if tool_responses:
+                        if not isinstance(tool_responses, list):
+                            tool_responses = [tool_responses]
+                        for tr in tool_responses:
+                            # Map old response format to new SDK dict requirement
+                            resp_val = tr.get('response')
+                            # If it's already a dict, use it, otherwise wrap it
+                            if not isinstance(resp_val, dict):
+                                resp_val = {"result": resp_val}
+                                
+                            parts.append(
+                                types.Part(
+                                    function_response=types.FunctionResponse(
+                                        name=tr['name'],
+                                        response=resp_val
+                                    )
+                                )
                             )
-                        )
-                    )
                 else:
-                    # Fallback for other JSON or plain text
-                    parts.append(content)
-            except json.JSONDecodeError:
-                parts.append(content)
+                    parts.append(types.Part(text=content))
+            except (json.JSONDecodeError, KeyError, TypeError):
+                parts.append(types.Part(text=content))
         else:
-            parts.append(content)
+            parts.append(types.Part(text=content))
 
         # Add image if present
         image_path = row["image_path"]
@@ -745,10 +757,10 @@ def get_history(session_id: str) -> List[Dict[str, str]]:
         mime_type = row["mime_type"] if "mime_type" in row.keys() else "image/jpeg" # Default fallback
         
         if gemini_uri:
-            # Use genai.protos.Part with FileData
+            # Use types.Part with FileData
             parts.append(
-                genai.protos.Part(
-                    file_data=genai.protos.FileData(
+                types.Part(
+                    file_data=types.FileData(
                         mime_type=mime_type,
                         file_uri=gemini_uri
                     )
@@ -758,8 +770,8 @@ def get_history(session_id: str) -> List[Dict[str, str]]:
             # Fallback for providers that don't use Gemini File API (e.g. OpenAI)
             # We treat the local path as the URI for internal processing
             parts.append(
-                genai.protos.Part(
-                    file_data=genai.protos.FileData(
+                types.Part(
+                    file_data=types.FileData(
                         mime_type=mime_type,
                         file_uri=image_path 
                     )
@@ -771,6 +783,7 @@ def get_history(session_id: str) -> List[Dict[str, str]]:
 
 @retry_on_db_lock()
 def save_message(session_id: str, role: str, content: str, image_path: Optional[str] = None, mime_type: Optional[str] = None, gemini_uri: Optional[str] = None, user_id: Optional[int] = None):
+    print(f"DEBUG: [save_message] session={session_id}, role={role}, content_len={len(content) if content else 0}")
     with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
         # Ensure conversation exists
         cursor = conn.execute("SELECT id, user_id FROM conversations WHERE id = ?", (session_id,))
@@ -1667,7 +1680,7 @@ def crawl_website(url: str, max_depth: int = 2, limit: int = 10, instructions: s
         for result in results:
             page_url = result.get('url', url)
             raw_content = result.get('raw_content', '')[:2000]  # Limit content per page
-            context_parts.append(f"Page: {page_url}\nContent: {raw_content}")
+            context_parts.append(types.Part(text=f"Page: {page_url}\nContent: {raw_content}"))
             sources.append({"url": page_url, "title": result.get('title', page_url)})
         
         context = "\n\n---\n\n".join(context_parts)
@@ -3698,12 +3711,13 @@ async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile 
     # Or we update render_bot_message. Let's update render_bot_message signature in previous chunk? 
     # No, let's just construct it here to be safe and explicit.
     bot_placeholder_html = f"""
-    <div id="{stream_id}" 
-         hx-ext="sse" 
-         sse-connect="{stream_url}" 
-         sse-swap="message" 
-         class="flex justify-start mb-4 animate-fade-in">
-        <div class="bg-white border border-gray-100 text-gray-800 px-5 py-4 rounded-2xl rounded-tl-sm max-w-[90%] shadow-sm prose prose-sm prose-blue max-w-none">
+    <div id="{stream_id}" class="flex justify-start mb-4 animate-fade-in">
+        <div id="{stream_id}-content" 
+             hx-ext="sse" 
+             sse-connect="{stream_url}" 
+             sse-swap="message" 
+             hx-swap="beforeend"
+             class="bg-white border border-gray-100 text-gray-800 px-5 py-4 rounded-2xl rounded-tl-sm max-w-[90%] shadow-sm prose prose-sm prose-blue max-w-none">
             <span id="cursor" class="inline-block w-2 h-5 bg-blue-500 cursor-blink align-middle"></span>
         </div>
     </div>
@@ -3821,7 +3835,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                     print(f"File is data (not media). Skipping Provider upload: {local_path}")
                     # Provide system notification about the file
                     file_name = os.path.basename(local_path)
-                    current_parts.append(f"[System Notification: User uploaded file '{file_name}' to '{local_path}'. You can use tools like 'read_uploaded_file' to read it, or pass the path to 'execute_calculation', 'generate_chart' or 'generate_plotly_chart'.]")
+                    current_parts.append(types.Part(text=f"[System Notification: User uploaded file '{file_name}' to '{local_path}'. You can use tools like 'read_uploaded_file' to read it, or pass the path to 'execute_calculation', 'generate_chart' or 'generate_plotly_chart'.]"))
 
             messages_payload.append({
                 "role": "user",
@@ -4229,7 +4243,7 @@ Technical Specifications for the workout .zwo Files (Critical)
                     # This avoids complexity with iterating streams for tool use
                     print("Sending request to model (stream=False)...")
                     if turn > 1:
-                         yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking (Step {turn})...</div>')
+                         yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking (Step {turn})...</div>')
                     else:
                          yield format_sse('<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Thinking...</div>')
                     
@@ -4307,12 +4321,32 @@ Technical Specifications for the workout .zwo Files (Critical)
                              yield format_sse("<div><strong>Error:</strong> Empty response content.</div>")
                              return
 
-                        part = response.candidates[0].content.parts[0]
-                        # check for function call in the response
-                        if part.function_call:
-                            print(f"Function call detected: {part.function_call.name}")
-                            fn_name = part.function_call.name
-                            fn_args = dict(part.function_call.args)
+                        # 1. Process all parts: aggregate text and find the first function call
+                        current_turn_text = ""
+                        fc = None
+                        tool_part = None
+                        
+                        for p in response.candidates[0].content.parts:
+                            if p.function_call and not fc:
+                                fc = p.function_call
+                                tool_part = p
+                                print(f"*** TOOL CALL DETECTED: {fc.name} with args: {fc.args} ***")
+                            elif p.text:
+                                current_turn_text += p.text
+                        
+                        # 2. Output any text discovered in this turn
+                        if current_turn_text:
+                            yield format_sse(current_turn_text)
+                            # Append to full_response_text for the final answer
+                            if full_response_text:
+                                full_response_text += "\n" + current_turn_text
+                            else:
+                                full_response_text = current_turn_text
+
+                        # 3. Handle Function Call (if any)
+                        if fc:
+                            fn_name = fc.name
+                            fn_args = dict(fc.args) if fc.args else {}
                             
                             # Notify user we are searching
                             yield format_sse(f'<div class="text-xs text-gray-400 mb-2 flex items-center gap-1"><svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Executing: {fn_name}...</div>')
@@ -4420,12 +4454,14 @@ Technical Specifications for the workout .zwo Files (Critical)
                             # Update history with function call and response
                             
                             # 1. Add the assistant's function call
+                            # 1. Add the assistant's function call (including any text it produced)
                             messages_payload.append({
                                 "role": "model",
-                                "parts": [part]
+                                "parts": response.candidates[0].content.parts
                             })
                             
                             # SAVE FUNCTION CALL TO DB
+                            print(f"DEBUG: Saving function call to DB: {fn_name}")
                             fc_json = json.dumps({
                                 "function_call": {
                                     "name": fn_name,
@@ -4538,6 +4574,7 @@ Technical Specifications for the workout .zwo Files (Critical)
                             # For search_web and crawl_website, save the ORIGINAL full response (with sources) to the DB
                             # so that sources can be re-rendered on page load
                             db_response = original_api_response if fn_name in ["search_web", "crawl_website"] else api_response
+                            print(f"DEBUG: Saving function response to DB: {fn_name}")
                             fr_json = json.dumps({
                                 "function_response": {
                                     "name": fn_name,
@@ -4551,8 +4588,8 @@ Technical Specifications for the workout .zwo Files (Critical)
                             messages_payload.append({
                                 "role": "function",
                                 "parts": [
-                                    genai.protos.Part(
-                                        function_response=genai.protos.FunctionResponse(
+                                    types.Part(
+                                        function_response=types.FunctionResponse(
                                             name=fn_name,
                                             response={"result": db_response}
                                         )
@@ -4582,7 +4619,7 @@ Technical Specifications for the workout .zwo Files (Critical)
                                             # Display chart to user immediately
                                             yield format_sse(f'<div class="mb-2"><img src="{chart_path}" alt="Generated Chart" class="max-w-full h-auto rounded-lg shadow-md"/></div>')
                                             
-                                            history_parts.append(f"![Generated Chart]({chart_path})")
+                                            history_parts.append(types.Part(text=f"![Generated Chart]({chart_path})"))
                                         
                                         # 2. Handle HTML Link (Interactive)
                                         if "html_path" in resp_data:
@@ -4596,7 +4633,7 @@ Technical Specifications for the workout .zwo Files (Critical)
                                             
                                             # Add to history (using special syntax we added preprocessing for, or just a link)
                                             # We'll use the link format since we have the image above
-                                            history_parts.append(f"\nInteractive Version: [{html_path}]({html_path})")
+                                            history_parts.append(types.Part(text=f"\nInteractive Version: [{html_path}]({html_path})"))
                                         
                                         # 3. Finalize
                                         if history_parts:
@@ -4655,11 +4692,8 @@ Technical Specifications for the workout .zwo Files (Critical)
                             continue
                         
                         else:
-                            # No function call, just text
-                            if part.text:
-                                full_response_text = part.text
-                                yield format_sse(full_response_text)
-                                break # Exit loop, we have the final answer
+                            # No function call, just final answer (text was already handled above)
+                            break # Exit turn loop
                     
                     except Exception as e:
                         print(f"Error processing response: {e}")

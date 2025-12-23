@@ -5,7 +5,7 @@ from typing import List, Dict, Any, AsyncGenerator, Optional
 from .base import LLMProvider
 from .utils import function_to_openai_tool
 import openai
-from google.generativeai import protos # Needed to parse history
+from google.genai import types as protos # Needed to parse history
 
 class OpenAIProvider(LLMProvider):
     def __init__(self, api_key: str = None, model_name: str = "gpt-4o"):
