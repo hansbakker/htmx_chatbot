@@ -261,6 +261,10 @@ def init_db():
             conn.execute("ALTER TABLE users ADD COLUMN coach_mode_enabled INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN automatic_function_calling INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
@@ -584,8 +588,8 @@ def save_setting(key: str, value: str):
         print(f"Error saving setting {key}: {e}")
 
 def save_user_setting(user_id: int, key: str, value: any):
-    """Saves a user-specific setting (dark_mode, selected_model, system_instruction, coach_mode_enabled)."""
-    if key not in ['dark_mode', 'selected_model', 'system_instruction', 'coach_mode_enabled']:
+    """Saves a user-specific setting (dark_mode, selected_model, system_instruction, coach_mode_enabled, automatic_function_calling)."""
+    if key not in ['dark_mode', 'selected_model', 'system_instruction', 'coach_mode_enabled', 'automatic_function_calling']:
         print(f"Unknown user setting: {key}")
         return
         
@@ -601,12 +605,13 @@ def get_user_settings(user_id: int) -> dict:
     try:
         with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
             conn.row_factory = sqlite3.Row
-            cursor = conn.execute("SELECT dark_mode, selected_model, system_instruction, coach_mode_enabled FROM users WHERE id = ?", (user_id,))
+            cursor = conn.execute("SELECT dark_mode, selected_model, system_instruction, coach_mode_enabled, automatic_function_calling FROM users WHERE id = ?", (user_id,))
             row = cursor.fetchone()
             if row:
                 settings = dict(row)
-                # Convert INTEGER to bool for coach_mode_enabled
+                # Convert INTEGER to bool
                 settings['coach_mode_enabled'] = bool(settings.get('coach_mode_enabled', 0))
+                settings['automatic_function_calling'] = bool(settings.get('automatic_function_calling', 1))
                 # If instruction is empty, fallback to global
                 if not settings.get('system_instruction'):
                     settings['system_instruction'] = get_system_instruction(None)
@@ -783,7 +788,6 @@ def get_history(session_id: str) -> List[Dict[str, str]]:
 
 @retry_on_db_lock()
 def save_message(session_id: str, role: str, content: str, image_path: Optional[str] = None, mime_type: Optional[str] = None, gemini_uri: Optional[str] = None, user_id: Optional[int] = None):
-    print(f"DEBUG: [save_message] session={session_id}, role={role}, content_len={len(content) if content else 0}")
     with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
         # Ensure conversation exists
         cursor = conn.execute("SELECT id, user_id FROM conversations WHERE id = ?", (session_id,))
@@ -3734,10 +3738,10 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
     if request.client:
         client_ip_ctx.set(request.client.host)
     
-    # Fetch user settings if logged in
     user_settings = None
     user_id = None
     coach_mode_enabled = False # Default
+    automatic_function_calling = True # Default
     if session_id:
         with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
             cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
@@ -3747,6 +3751,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 user_settings = get_user_settings(user_id)
                 if user_settings:
                     coach_mode_enabled = user_settings.get('coach_mode_enabled', False)
+                    automatic_function_calling = user_settings.get('automatic_function_calling', True)
     # Fallback/Override logic
     if selected_model is None:
         selected_model = user_settings['selected_model'] if user_settings else get_setting("selected_model", "gemini-2.5-flash")
@@ -4257,7 +4262,8 @@ Technical Specifications for the workout .zwo Files (Critical)
                                     messages=messages_payload,
                                     tools=tools if tools else None,
                                     system_instruction=current_instruction,
-                                    stream=False
+                                    stream=False,
+                                    automatic_function_calling=automatic_function_calling
                                 )
                             else:
                                 raise ValueError("LLM Provider not initialized")
@@ -4461,7 +4467,6 @@ Technical Specifications for the workout .zwo Files (Critical)
                             })
                             
                             # SAVE FUNCTION CALL TO DB
-                            print(f"DEBUG: Saving function call to DB: {fn_name}")
                             fc_json = json.dumps({
                                 "function_call": {
                                     "name": fn_name,
@@ -4476,7 +4481,7 @@ Technical Specifications for the workout .zwo Files (Critical)
                                 if code:
                                     # Use OOB swap to insert the code block before the streaming response
                                     code_html = f"""
-                                    <div id="code-block-{stream_id}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                                    <div id="code-block-{stream_id}-{turn}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 w-full">
                                         <details class="group">
                                             <summary class="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
                                                 <span class="transition group-open:rotate-90">▶</span>
@@ -4509,7 +4514,7 @@ Technical Specifications for the workout .zwo Files (Critical)
                                 if content_to_show and not (fn_name == "read_source_code" and content_to_show.startswith("Error")):
                                     # Use OOB swap to insert the code block before the streaming response
                                     code_html = f"""
-                                    <div id="file-content-{stream_id}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                                    <div id="file-content-{stream_id}-{turn}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 w-full">
                                         <details class="group" open>
                                             <summary class="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
                                                 <span class="transition group-open:rotate-90">▶</span>
@@ -4534,7 +4539,7 @@ Technical Specifications for the workout .zwo Files (Critical)
                                     if sources:
                                         source_label = "🔍 Sources used for web search" if fn_name == "search_web" else "🕸️ Pages crawled from website"
                                         sources_html = f"""
-                                        <div id="sources-block-{stream_id}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4">
+                                        <div id="sources-block-{stream_id}-{turn}" hx-swap-oob="beforebegin:#{stream_id}" class="mb-4 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 w-full">
                                             <details class="group">
                                                 <summary class="cursor-pointer text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
                                                     <span class="transition group-open:rotate-90">▶</span>
@@ -4574,7 +4579,6 @@ Technical Specifications for the workout .zwo Files (Critical)
                             # For search_web and crawl_website, save the ORIGINAL full response (with sources) to the DB
                             # so that sources can be re-rendered on page load
                             db_response = original_api_response if fn_name in ["search_web", "crawl_website"] else api_response
-                            print(f"DEBUG: Saving function response to DB: {fn_name}")
                             fr_json = json.dumps({
                                 "function_response": {
                                     "name": fn_name,
@@ -4928,6 +4932,17 @@ async def get_system_instruction_ui(user_id: int = Depends(get_current_user_id))
 
                                     <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
                                         <div class="flex flex-col">
+                                            <span class="font-medium text-gray-900 dark:text-gray-300">Automatic Function Calling</span>
+                                            <span class="text-xs text-gray-500 dark:text-gray-400">SDK handles tool turns automatically (Faster)</span>
+                                        </div>
+                                        <label class="relative inline-flex items-center cursor-pointer">
+                                            <input type="checkbox" name="automatic_function_calling" value="true" {"checked" if user_settings.get('automatic_function_calling', True) else ""} class="sr-only peer">
+                                            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-blue-600"></div>
+                                        </label>
+                                    </div>
+
+                                    <div class="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700">
+                                        <div class="flex flex-col">
                                             <span class="font-medium text-gray-900 dark:text-gray-300">Dark Mode</span>
                                             <span class="text-xs text-gray-500 dark:text-gray-400">Toggle application theme</span>
                                         </div>
@@ -5055,6 +5070,7 @@ async def post_system_instruction(
     execution_mode: str = Form(None), 
     e2b_timeout: int = Form(300),
     coach_mode_enabled: str = Form(None),
+    automatic_function_calling: str = Form(None),
     user_id: int = Depends(get_current_user_id)
 ):
     if isinstance(user_id, Response): return user_id
@@ -5063,6 +5079,7 @@ async def post_system_instruction(
     save_user_setting(user_id, 'selected_model', model)
     save_user_setting(user_id, 'system_instruction', instruction)
     save_user_setting(user_id, 'coach_mode_enabled', 1 if coach_mode_enabled == 'true' else 0)
+    save_user_setting(user_id, 'automatic_function_calling', 1 if automatic_function_calling == 'true' else 0)
 
     response = Response(content="""
     <div id="settings-modal" class="fixed inset-0 z-50 flex items-end justify-center p-4 pointer-events-none">

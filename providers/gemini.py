@@ -74,7 +74,9 @@ class GeminiProvider(LLMProvider):
         
         # Merge other kwargs into config if they are valid
         for key, value in kwargs.items():
-            if hasattr(config, key):
+            if key == 'automatic_function_calling' and isinstance(value, bool):
+                config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=not value)
+            elif hasattr(config, key):
                 setattr(config, key, value)
 
         response = self.client.models.generate_content(
@@ -114,7 +116,9 @@ class GeminiProvider(LLMProvider):
         
         # Merge other kwargs into config if they are valid
         for key, value in kwargs.items():
-            if hasattr(config, key):
+            if key == 'automatic_function_calling' and isinstance(value, bool):
+                config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=not value)
+            elif hasattr(config, key):
                 setattr(config, key, value)
 
         try:
