@@ -32,7 +32,7 @@ A lightweight, high-performance LLM chatbot implementation using **HTMX** for th
 
 ## Prerequisites
 
-*   Python 3.9+
+*   Python 3.12+
 *   **API Keys:**
     *   [Gemini API Key](https://aistudio.google.com/) and/or [OpenAI API Key](https://platform.openai.com/).
     *   [Tavily API Key](https://tavily.com/) for web search/crawling.

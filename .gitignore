@@ -4,6 +4,7 @@
 # Python
 venv/
 venv_old/
+/venv_clean
 __pycache__/
 *.pyc
 
