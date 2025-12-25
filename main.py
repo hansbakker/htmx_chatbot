@@ -2483,6 +2483,79 @@ def get_training_plan_week(plan_id: int, week_number: int):
         print(f"Error in get_training_plan_week: {str(e)}")
         return f"Error: {str(e)}"
 
+def get_intervals_icu_activities(oldest: str, newest: str):
+    """
+    Retrieves cycling activities from Intervals.icu for a specific time span.
+    
+    Args:
+        oldest (str): The oldest date/time to retrieve (ISO format, e.g., "2025-12-15T00:00:00").
+        newest (str): The newest date/time to retrieve (ISO format, e.g., "2025-12-16T00:00:00").
+                      Max span: 14 days.
+    
+    Returns:
+        str: A JSON-formatted string containing the filtered activities or an error message.
+    """
+    import json
+    import requests
+    from requests.auth import HTTPBasicAuth
+    
+    session_id = session_id_ctx.get()
+    user_id = None
+    athlete_id = None
+    api_key = None
+    
+    try:
+        # 1. Resolve user_id and Intervals.icu credentials
+        if session_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row['user_id']
+                
+                if user_id:
+                    cursor = conn.execute("SELECT intervals_athlete_id, intervals_api_key FROM users WHERE id = ?", (user_id,))
+                    u_row = cursor.fetchone()
+                    if u_row:
+                        athlete_id = u_row['intervals_athlete_id']
+                        api_key = u_row['intervals_api_key']
+
+        if not athlete_id or not api_key:
+            return "Error: Intervals.icu credentials not found for this user. Please configure them in settings."
+        
+        # 2. Call Intervals.icu API
+        url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities?oldest={oldest}&newest={newest}"
+        
+        response = requests.get(
+            url, 
+            auth=HTTPBasicAuth('API_KEY', api_key),
+            headers={'Accept': '*/*'}
+        )
+        
+        if response.status_code != 200:
+            return f"Error: Intervals.icu API returned status {response.status_code}: {response.text}"
+        
+        activities = response.json()
+        
+        # 3. Filter requested fields
+        filtered_activities = []
+        fields_to_keep = [
+            "id", "start_date_local", "type", "icu_ctl", "icu_atl", 
+            "icu_efficiency_factor", "decoupling", "icu_pm_ftp_watts", 
+            "icu_zone_times", "icu_resting_hr", "carbs_used"
+        ]
+        
+        for act in activities:
+            filtered_act = {field: act.get(field) for field in fields_to_keep}
+            filtered_activities.append(filtered_act)
+            
+        return json.dumps(filtered_activities, indent=2)
+            
+    except Exception as e:
+        print(f"Error in get_intervals_icu_activities: {str(e)}")
+        return f"Error: {str(e)}"
+
 def get_training_plan_summary(plan_id: int = None):
     """
     Retrieves a summary of all training plans or a specific plan's metadata.
@@ -4249,7 +4322,7 @@ Technical Specifications for the workout .zwo Files (Critical)
     *   SOLUTION: Use High-Power `<SteadyState>` (e.g., `Power="2.0"` or `Power="3.0"`) for sprints.
 *   Delivery: if download is requested, always bundle files into ZIP archives when there's more then 1.
 
-
+DO NOT add coach notes to clearly unrelated conversation messages.
 """
                     tools.append(upload_workout_to_intervals)
                     current_instruction += """\n\n- You have access to an 'upload_workout_to_intervals' tool. 
@@ -4298,6 +4371,11 @@ Technical Specifications for the workout .zwo Files (Critical)
                     current_instruction += """\n\n- You have access to a 'query_training_plan_stats' tool. 
                     - Use it to calculate total TSS, minutes, and other statistics for a training plan within a date range."""
 
+                    tools.append(get_intervals_icu_activities)
+                    current_instruction += """\n\n- You have access to a 'get_intervals_icu_activities' tool. 
+                    - Use it to retrieve actual cycling activities for a specific time span. 
+                    - Arguments: oldest (ISO str), newest (ISO str). Typically use today or a range up to 14 days in the past."""
+
                 
             else:
                 # When files are present, clear history to avoid API compatibility issues
@@ -4308,7 +4386,13 @@ Technical Specifications for the workout .zwo Files (Critical)
                     messages_payload = [current_msg]
                 
                 current_instruction += "\n\nNote: Tool calling is disabled because you are analyzing an uploaded file. Focus on the file content."
-            
+           
+            current_instruction += """\n\nCONTEXTUAL SILOING RULE: You operate in two distinct modes: General Assistant and Cycling Performance Specialist. 
+            1. Trigger: Only activate the "Cycling Performance Specialist" persona if the user’s prompt explicitly mentions cycling, workouts, training plans, physical performance, or specific fitness metrics (FTP, TSS, CTL). 
+            2. Constraint: If the prompt is about general topics (weather, news, time, general facts, or casual chat), you MUST remain in "General Assistant" mode. 
+            3. Strict Prohibition: While in "General Assistant" mode, it is a CRITICAL FAILURE to reference the user's training plan, upcoming workouts, fitness stats, or provide "coach-like" advice. Answer the general query concisely and stop.
+            """
+            # Add suggestions to the end of the response
             current_instruction += """\n\nif you have actionable follow-up suggestions, 
             append them to the very end of your response as a JSON object with the key 'suggestions', 
             -DO NOT wrap this JSON object in markdown code blocks. Doing so will is a FAILURE.
@@ -4562,6 +4646,8 @@ Technical Specifications for the workout .zwo Files (Critical)
                                 api_response = get_training_plan_week(fn_args.get("plan_id"), fn_args.get("week_number"))
                             elif fn_name == "query_training_plan_stats":
                                 api_response = query_training_plan_stats(fn_args.get("plan_id"), fn_args.get("start_date"), fn_args.get("end_date"))
+                            elif fn_name == "get_intervals_icu_activities":
+                                api_response = get_intervals_icu_activities(fn_args.get("oldest"), fn_args.get("newest"))
                             elif fn_name == "modify_training_plan_start_date":
                                 api_response = modify_training_plan_start_date(fn_args.get("plan_id"), fn_args.get("new_start_date"))
                             else:
