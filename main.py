@@ -434,6 +434,26 @@ def init_db():
             conn.execute("ALTER TABLE activities ADD COLUMN workout_id INTEGER")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE activities ADD COLUMN icu_hr_zone_times TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE activities ADD COLUMN icu_power_zones TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE activities ADD COLUMN icu_hr_zones TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE activities ADD COLUMN icu_achievements TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE activities ADD COLUMN icu_ftp INTEGER")
+        except sqlite3.OperationalError:
+            pass
 
         # Weeks with CASCADE
         conn.execute("""
@@ -2564,7 +2584,9 @@ def get_intervals_icu_activities(oldest: str, newest: str, fields: str = None):
         default_fields = [
             "id", "start_date_local", "type", "icu_ctl", "icu_atl", 
             "icu_efficiency_factor", "decoupling", "icu_pm_ftp_watts", 
-            "icu_zone_times", "icu_resting_hr", "carbs_used"
+            "icu_zone_times", "icu_resting_hr", "carbs_used",
+            "icu_hr_zone_times", "icu_power_zones", "icu_hr_zones", 
+            "icu_achievements", "icu_ftp"
         ]
         
         # Fields to actually return to LLM in this call
@@ -2630,8 +2652,10 @@ def get_intervals_icu_activities(oldest: str, newest: str, fields: str = None):
                         user_id, icu_activity_id, start_date_local, type, 
                         icu_ctl, icu_atl, icu_efficiency_factor, decoupling, 
                         icu_pm_ftp_watts, icu_zone_times, icu_resting_hr, carbs_used,
+                        icu_hr_zone_times, icu_power_zones, icu_hr_zones, 
+                        icu_achievements, icu_ftp,
                         workout_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                         COALESCE((SELECT workout_id FROM activities WHERE icu_activity_id = ?), NULL)
                     )
                 """, (
@@ -2647,6 +2671,11 @@ def get_intervals_icu_activities(oldest: str, newest: str, fields: str = None):
                     json.dumps(act.get("icu_zone_times")) if act.get("icu_zone_times") else None,
                     act.get("icu_resting_hr"),
                     act.get("carbs_used"),
+                    json.dumps(act.get("icu_hr_zone_times")) if act.get("icu_hr_zone_times") else None,
+                    json.dumps(act.get("icu_power_zones")) if act.get("icu_power_zones") else None,
+                    json.dumps(act.get("icu_hr_zones")) if act.get("icu_hr_zones") else None,
+                    json.dumps(act.get("icu_achievements")) if act.get("icu_achievements") else None,
+                    act.get("icu_ftp"),
                     icu_activity_id
                 ))
             conn.commit()
@@ -2702,11 +2731,13 @@ def get_activities_from_db(start_date: str, end_date: str):
             
             # Parse JSON fields and add hints
             for act in activities:
-                if act.get('icu_zone_times'):
-                    try:
-                        act['icu_zone_times'] = json.loads(act['icu_zone_times'])
-                    except:
-                        pass
+                json_fields = ['icu_zone_times', 'icu_hr_zone_times', 'icu_power_zones', 'icu_hr_zones', 'icu_achievements']
+                for field in json_fields:
+                    if act.get(field):
+                        try:
+                            act[field] = json.loads(act[field])
+                        except:
+                            pass
                 
                 # Add linking hints if not yet linked
                 if not act.get('workout_id'):
@@ -4549,6 +4580,31 @@ Technical Specifications for the workout .zwo Files (Critical)
 *   Delivery: if download is requested, always bundle files into ZIP archives when there's more then 1.
 
 DO NOT add coach notes to clearly unrelated conversation messages.
+
+ACTIVITIES DATA (INTERVALS.ICU) INTERPRETATION PROTOCOL
+1. The Three-Tier FTP Hierarchy
+To ensure accurate coaching, always distinguish between these three fields found in the activity JSON:
+*   icu_ftp (Global/Stated FTP): The athlete's manually set baseline in their settings. 
+*   icu_pm_ftp_watts (System/Calculation FTP): The specific value the API used to calculate that ride's TSS and Intensity Factor. Crucial: This is often an auto-calculated estimate and may not match the athlete's actual current capacity.
+*   icu_pm_ftp (Ride Performance eFTP): A heuristic representing the intensity "shown" during that specific activity. Use this for freshness/fatigue tracking, not for baseline setting.
+2. TSS & Intensity Factor (IF) Validation
+The "Inflation" Rule: If icu_pm_ftp_watts is lower than the athlete’s verified baseline, the reported TSS and IF are mathematically inflated.
+Normalization Formula: To find the true physiological stress relative to a known baseline (Target_FTP), use:
+Adjusted_TSS=Reported_TSS×(icu_pm_ftp_wattsTarget_FTP)2Adjusted\_TSS = Reported\_TSS \times \left(\frac{icu\_pm\_ftp\_watts}{Target\_FTP}\right)^2Adjusted_TSS=Reported_TSS×(Target_FTPicu_pm_ftp_watts​)2
+IF Logic: Intensity Factor is relative. An IF of 0.80 based on a low estimate (e.g., 200W) represents a much lower physical load than an IF of 0.80 based on a true 250W capacity.
+
+3. Heart Rate Data Artifacts
+icu_resting_hr in Activity Data: This field in an activity JSON often captures the "Starting HR" (the heart rate when the strap was first connected or the activity started).
+Heuristic Warning: Do not use this as a basal resting heart rate for recovery analysis unless verified against sleep/morning data. A high value (e.g., 80-90 bpm) often just reflects pre-ride preparation stress.
+
+4. Zone & Achievement Forensics
+icu_power_zones / icu_hr_zones: These arrays reveal the "ruler" used at the time of the activity. Always compare these to the athlete's current zones to check for sync issues between the coaching plan and the athlete's head unit.
+icu_achievements: This field flags performance breakthroughs. Use it to validate if a "Build" phase is working or if an athlete is over-exerting during a "Recovery" phase.
+
+5. Fueling Correlation
+carbs_used: Use this field to correlate "True TSS" (Adjusted) with fuel burn to provide specific fueling strategies (grams of carbs per hour) for upcoming endurance sessions.
+
+
 """
                     tools.append(upload_workout_to_intervals)
                     current_instruction += """\n\n- You have access to an 'upload_workout_to_intervals' tool. 
