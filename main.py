@@ -3407,255 +3407,358 @@ def get_coordinates(location: str):
     except Exception as e:
         return f"Error getting coordinates: {str(e)}"
 
-def get_weather(location: str):
+# def get_weather(location: str):
+#     """
+#     Gets current weather information for a specific location using XWeather MCP server.
+#     Use this tool when the user asks about weather, temperature, conditions,  etc.
+#     
+#     Args:
+#         location (str): The location to get weather for (city name, address, etc.)
+#     
+#     Returns:
+#         str: Current weather information for the location
+#     """
+#     try:
+#         import requests
+#         
+#         # Get XWeather credentials from environment
+#         xweather_id = os.getenv("XWEATHER_MCP_ID")
+#         xweather_secret = os.getenv("XWEATHER_MCP_SECRET")
+#         
+#         if not xweather_id or not xweather_secret:
+#             return "Error: XWeather API credentials not configured. Please set XWEATHER_MCP_ID and XWEATHER_MCP_SECRET in .env file."
+#         
+#         # MCP server endpoint
+#         mcp_url = "https://mcp.api.xweather.com/mcp"
+#         
+#         # Prepare authorization (using client_id:client_secret format)
+#         auth_string = f"{xweather_id}_{xweather_secret}"
+#         
+#         # Make request to MCP server
+#         # The MCP server expects a JSON-RPC 2.0 request
+#         payload = {
+#             "jsonrpc": "2.0",
+#             "id": 1,
+#             "method": "tools/call",
+#             "params": {
+#                 "name": "xweather_get_current_weather",
+#                 "arguments": {
+#                     "location": location
+#                 }
+#             }
+#         }
+#         
+#         headers = {
+#             "Authorization": f"Bearer {auth_string}",
+#             "Content-Type": "application/json",
+#             "Accept": "application/json, text/event-stream"
+#         }
+#         
+#         response = requests.post(mcp_url, json=payload, headers=headers, timeout=10)
+#         
+#         print(f"XWeather API Status: {response.status_code}")
+#         print(f"XWeather API Response: {response.text[:500]}")  # Print first 500 chars
+#         
+#         if response.status_code == 200:
+#             try:
+#                 # The response is in SSE format, need to parse it
+#                 response_text = response.text
+#                 
+#                 # Extract JSON from SSE data field
+#                 if "data:" in response_text:
+#                     # Split by lines and find the data line
+#                     for line in response_text.split('\n'):
+#                         if line.startswith('data:'):
+#                             json_str = line[5:].strip()  # Remove 'data:' prefix
+#                             data = json.loads(json_str)
+#                             
+#                             # Check for errors in the result
+#                             if "result" in data:
+#                                 result = data["result"]
+#                                 if isinstance(result, dict) and result.get("isError"):
+#                                     # Extract error message
+#                                     if "content" in result and len(result["content"]) > 0:
+#                                         error_text = result["content"][0].get("text", "Unknown error")
+#                                         # Add helpful hint for invalid location errors
+#                                         if "invalid" in error_text.lower() and "location" in error_text.lower():
+#                                             error_text += "\n\nHint: Try specifying the location more precisely, e.g., 'Minneapolis, MN', 'London, UK', or use a zip code like '55401'."
+#                                         return f"Weather service error: {error_text}"
+#                                     return f"Weather service error: {result}"
+#                                 
+#                                 # Return successful result
+#                                 if "content" in result and len(result["content"]) > 0:
+#                                     return result["content"][0].get("text", str(result))
+#                                 return str(result)
+#                             else:
+#                                 return str(data)
+#                     
+#                     return f"Error: Could not parse SSE response: {response_text[:200]}"
+#                 else:
+#                     # Try parsing as regular JSON
+#                     data = response.json()
+#                     if "result" in data:
+#                         return str(data["result"])
+#                     else:
+#                         return str(data)
+#                         
+#             except json.JSONDecodeError as e:
+#                 print(f"JSON decode error: {e}")
+#                 print(f"Response content: {response.text}")
+#                 return f"Error: Received invalid JSON from XWeather API. Response: {response.text[:200]}"
+#         else:
+#             print(response.text)
+#             return f"Error: XWeather API returned status {response.status_code}: {response.text}"
+#             
+#     except Exception as e:
+#         return f"Error getting weather: {str(e)}"
+
+# def get_forecast_weather(location: str):
+#     """
+#     Gets multi-day weather forecast for a specific location using XWeather MCP server.
+#     Use this tool for planning, event scheduling, travel preparation, or when the user asks about future weather.
+#     
+#     Args:
+#         location (str): The location to get forecast for (city, state/country, or zip code)
+#     
+#     Returns:
+#         str: Multi-day weather forecast with temperatures, precipitation, wind, and conditions
+#     """
+#     try:
+#         import requests
+#         
+#         xweather_id = os.getenv("XWEATHER_MCP_ID")
+#         xweather_secret = os.getenv("XWEATHER_MCP_SECRET")
+#         
+#         if not xweather_id or not xweather_secret:
+#             return "Error: XWeather API credentials not configured."
+#         
+#         mcp_url = "https://mcp.api.xweather.com/mcp"
+#         auth_string = f"{xweather_id}_{xweather_secret}"
+#         
+#         payload = {
+#             "jsonrpc": "2.0",
+#             "id": 1,
+#             "method": "tools/call",
+#             "params": {
+#                 "name": "xweather_get_forecast_weather",
+#                 "arguments": {
+#                     "location": location
+#                 }
+#             }
+#         }
+#         
+#         headers = {
+#             "Authorization": f"Bearer {auth_string}",
+#             "Content-Type": "application/json",
+#             "Accept": "application/json, text/event-stream"
+#         }
+#         
+#         response = requests.post(mcp_url, json=payload, headers=headers, timeout=10)
+#         
+#         if response.status_code == 200:
+#             response_text = response.text
+#             if "data:" in response_text:
+#                 for line in response_text.split('\n'):
+#                     if line.startswith('data:'):
+#                         json_str = line[5:].strip()
+#                         try:
+#                             data = json.loads(json_str)
+#                             
+#                             if "result" in data:
+#                                 result = data["result"]
+#                                 if isinstance(result, dict) and result.get("isError"):
+#                                     if "content" in result and len(result["content"]) > 0:
+#                                         error_text = result["content"][0].get("text", "Unknown error")
+#                                         if "invalid" in error_text.lower() and "location" in error_text.lower():
+#                                             error_text += "\n\nHint: Try specifying the location more precisely, e.g., 'Minneapolis, MN', 'London, UK', or use a zip code."
+#                                         return f"Weather service error: {error_text}"
+#                                 
+#                                 if "content" in result and len(result["content"]) > 0:
+#                                     return result["content"][0].get("text", str(result))
+#                                 return str(result)
+#                         except json.JSONDecodeError:
+#                             pass
+#                             
+#                 return f"Error: Could not parse forecast response"
+#         else:
+#             return f"Error: XWeather API returned status {response.status_code}"
+#             
+#     except Exception as e:
+#         return f"Error getting forecast: {str(e)}"
+
+# def get_precipitation_timing(location: str):
+#     """
+#     Gets timing information for upcoming precipitation (rain, snow, etc.) in the next hours to days.
+#     Use this tool when the user asks "when will it rain?", "when will it stop raining?", or needs precipitation timing for outdoor activities.
+#     
+#     Args:
+#         location (str): The location to get precipitation timing for (city, state/country, or zip code)
+#     
+#     Returns:
+#         str: Start/stop timing and duration of upcoming precipitation
+#     """
+#     try:
+#         import requests
+#         
+#         xweather_id = os.getenv("XWEATHER_MCP_ID")
+#         xweather_secret = os.getenv("XWEATHER_MCP_SECRET")
+#         
+#         if not xweather_id or not xweather_secret:
+#             return "Error: XWeather API credentials not configured."
+#         
+#         mcp_url = "https://mcp.api.xweather.com/mcp"
+#         auth_string = f"{xweather_id}_{xweather_secret}"
+#         
+#         payload = {
+#             "jsonrpc": "2.0",
+#             "id": 1,
+#             "method": "tools/call",
+#             "params": {
+#                 "name": "xweather_get_forecast_precipitation_timing",
+#                 "arguments": {
+#                     "location": location
+#                 }
+#             }
+#         }
+#         
+#         headers = {
+#             "Authorization": f"Bearer {auth_string}",
+#             "Content-Type": "application/json",
+#             "Accept": "application/json, text/event-stream"
+#         }
+#         
+#         response = requests.post(mcp_url, json=payload, headers=headers, timeout=10)
+#         
+#         if response.status_code == 200:
+#             response_text = response.text
+#             if "data:" in response_text:
+#                 for line in response_text.split('\n'):
+#                     if line.startswith('data:'):
+#                         json_str = line[5:].strip()
+#                         data = json.loads(json_str)
+#                         
+#                         if "result" in data:
+#                             result = data["result"]
+#                             if isinstance(result, dict) and result.get("isError"):
+#                                 if "content" in result and len(result["content"]) > 0:
+#                                     error_text = result["content"][0].get("text", "Unknown error")
+#                                     if "invalid" in error_text.lower() and "location" in error_text.lower():
+#                                         error_text += "\n\nHint: Try specifying the location more precisely, e.g., 'Minneapolis, MN', 'London, UK', or use a zip code."
+#                                     return f"Weather service error: {error_text}"
+#                             
+#                             if "content" in result and len(result["content"]) > 0:
+#                                 return result["content"][0].get("text", str(result))
+#                             return str(result)
+#                         
+#                 return f"Error: Could not parse precipitation timing response"
+#         else:
+#             return f"Error: XWeather API returned status {response.status_code}"
+#             
+#     except Exception as e:
+#         return f"Error getting precipitation timing: {str(e)}"
+
+def get_open_meteo_weather(location: str):
     """
-    Gets current weather information for a specific location using XWeather MCP server.
-    Use this tool when the user asks about weather, temperature, conditions,  etc.
+    Gets current weather and forecast for a specific location using the Open-Meteo API.
+    Use this tool when the user asks about weather, temperature, wind, humidity, or forecasts.
     
     Args:
         location (str): The location to get weather for (city name, address, etc.)
     
     Returns:
-        str: Current weather information for the location
+        str: Weather information including current conditions, next 24 hours, and 7-day daily forecast.
     """
     try:
         import requests
+        from geopy.geocoders import Nominatim
         
-        # Get XWeather credentials from environment
-        xweather_id = os.getenv("XWEATHER_MCP_ID")
-        xweather_secret = os.getenv("XWEATHER_MCP_SECRET")
+        # 1. Geocode location
+        geolocator = Nominatim(user_agent="htmx_chatbot")
+        loc = geolocator.geocode(location)
+        if not loc:
+            return f"Error: Could not find coordinates for '{location}'."
         
-        if not xweather_id or not xweather_secret:
-            return "Error: XWeather API credentials not configured. Please set XWEATHER_MCP_ID and XWEATHER_MCP_SECRET in .env file."
+        lat = loc.latitude
+        lon = loc.longitude
         
-        # MCP server endpoint
-        mcp_url = "https://mcp.api.xweather.com/mcp"
-        
-        # Prepare authorization (using client_id:client_secret format)
-        auth_string = f"{xweather_id}_{xweather_secret}"
-        
-        # Make request to MCP server
-        # The MCP server expects a JSON-RPC 2.0 request
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "xweather_get_current_weather",
-                "arguments": {
-                    "location": location
-                }
-            }
+        # 2. Call Open-Meteo API
+        url = "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "current": "temperature_2m,wind_speed_10m,relative_humidity_2m,weather_code",
+            "hourly": "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code",
+            "timezone": "auto"
         }
         
-        headers = {
-            "Authorization": f"Bearer {auth_string}",
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream"
+        response = requests.get(url, params=params)
+        if response.status_code != 200:
+            return f"Error: Open-Meteo API returned status {response.status_code}: {response.text}"
+        
+        data = response.json()
+        
+        # WMO Weather interpretation codes (WW)
+        weather_codes = {
+            0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+            45: "Fog", 48: "Depositing rime fog",
+            51: "Light drizzle", 53: "Moderate drizzle", 55: "Dense drizzle",
+            61: "Slight rain", 63: "Moderate rain", 65: "Heavy rain",
+            71: "Slight snow fall", 73: "Moderate snow fall", 75: "Heavy snow fall",
+            77: "Snow grains", 80: "Slight rain showers", 81: "Moderate rain showers", 82: "Violent rain showers",
+            85: "Slight snow showers", 86: "Heavy snow showers",
+            95: "Thunderstorm: Slight or moderate", 96: "Thunderstorm with slight hail", 99: "Thunderstorm with heavy hail"
         }
         
-        response = requests.post(mcp_url, json=payload, headers=headers, timeout=10)
+        # 3. Format result
+        current = data.get("current", {})
+        temp = current.get("temperature_2m")
+        wind = current.get("wind_speed_10m")
+        humidity = current.get("relative_humidity_2m")
+        w_code = current.get("weather_code")
+        condition = weather_codes.get(w_code, "Unknown")
         
-        print(f"XWeather API Status: {response.status_code}")
-        print(f"XWeather API Response: {response.text[:500]}")  # Print first 500 chars
+        unit_temp = data.get("current_units", {}).get("temperature_2m", "°C")
+        unit_wind = data.get("current_units", {}).get("wind_speed_10m", "km/h")
         
-        if response.status_code == 200:
-            try:
-                # The response is in SSE format, need to parse it
-                response_text = response.text
-                
-                # Extract JSON from SSE data field
-                if "data:" in response_text:
-                    # Split by lines and find the data line
-                    for line in response_text.split('\n'):
-                        if line.startswith('data:'):
-                            json_str = line[5:].strip()  # Remove 'data:' prefix
-                            data = json.loads(json_str)
-                            
-                            # Check for errors in the result
-                            if "result" in data:
-                                result = data["result"]
-                                if isinstance(result, dict) and result.get("isError"):
-                                    # Extract error message
-                                    if "content" in result and len(result["content"]) > 0:
-                                        error_text = result["content"][0].get("text", "Unknown error")
-                                        # Add helpful hint for invalid location errors
-                                        if "invalid" in error_text.lower() and "location" in error_text.lower():
-                                            error_text += "\n\nHint: Try specifying the location more precisely, e.g., 'Minneapolis, MN', 'London, UK', or use a zip code like '55401'."
-                                        return f"Weather service error: {error_text}"
-                                    return f"Weather service error: {result}"
-                                
-                                # Return successful result
-                                if "content" in result and len(result["content"]) > 0:
-                                    return result["content"][0].get("text", str(result))
-                                return str(result)
-                            else:
-                                return str(data)
-                    
-                    return f"Error: Could not parse SSE response: {response_text[:200]}"
-                else:
-                    # Try parsing as regular JSON
-                    data = response.json()
-                    if "result" in data:
-                        return str(data["result"])
-                    else:
-                        return str(data)
-                        
-            except json.JSONDecodeError as e:
-                print(f"JSON decode error: {e}")
-                print(f"Response content: {response.text}")
-                return f"Error: Received invalid JSON from XWeather API. Response: {response.text[:200]}"
-        else:
-            print(response.text)
-            return f"Error: XWeather API returned status {response.status_code}: {response.text}"
-            
+        result = f"Weather for {loc.address}:\n"
+        result += f"Current: {condition}, {temp}{unit_temp}, Wind: {wind}{unit_wind}, Humidity: {humidity}%\n"
+        
+        # Hourly Forecast (Next 24 hours)
+        hourly = data.get("hourly", {})
+        h_times = hourly.get("time", [])[:24]
+        h_temps = hourly.get("temperature_2m", [])[:24]
+        h_codes = hourly.get("weather_code", [])[:24]
+        
+        if h_times:
+            result += "\nHourly Forecast (Next 24 hours):\n"
+            # Show every 3rd hour to keep it concise
+            for i in range(0, len(h_times), 3):
+                t = h_times[i].split("T")[-1]
+                cond = weather_codes.get(h_codes[i], "")
+                result += f"- {t}: {h_temps[i]}{unit_temp} ({cond})\n"
+        
+        # Daily Forecast (7 days)
+        daily = data.get("daily", {})
+        d_times = daily.get("time", [])
+        d_max = daily.get("temperature_2m_max", [])
+        d_min = daily.get("temperature_2m_min", [])
+        d_precip = daily.get("precipitation_sum", [])
+        d_codes = daily.get("weather_code", [])
+        
+        if d_times:
+            result += "\n7-Day Daily Forecast:\n"
+            for i in range(len(d_times)):
+                date = d_times[i]
+                cond = weather_codes.get(d_codes[i], "")
+                result += f"- {date}: {cond}, High: {d_max[i]}{unit_temp}, Low: {d_min[i]}{unit_temp}, Precip: {d_precip[i]}mm\n"
+        
+        return result
+        
     except Exception as e:
-        return f"Error getting weather: {str(e)}"
+        return f"Error getting weather from Open-Meteo: {str(e)}"
 
-def get_forecast_weather(location: str):
-    """
-    Gets multi-day weather forecast for a specific location using XWeather MCP server.
-    Use this tool for planning, event scheduling, travel preparation, or when the user asks about future weather.
-    
-    Args:
-        location (str): The location to get forecast for (city, state/country, or zip code)
-    
-    Returns:
-        str: Multi-day weather forecast with temperatures, precipitation, wind, and conditions
-    """
-    try:
-        import requests
-        
-        xweather_id = os.getenv("XWEATHER_MCP_ID")
-        xweather_secret = os.getenv("XWEATHER_MCP_SECRET")
-        
-        if not xweather_id or not xweather_secret:
-            return "Error: XWeather API credentials not configured."
-        
-        mcp_url = "https://mcp.api.xweather.com/mcp"
-        auth_string = f"{xweather_id}_{xweather_secret}"
-        
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "xweather_get_forecast_weather",
-                "arguments": {
-                    "location": location
-                }
-            }
-        }
-        
-        headers = {
-            "Authorization": f"Bearer {auth_string}",
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream"
-        }
-        
-        response = requests.post(mcp_url, json=payload, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            response_text = response.text
-            if "data:" in response_text:
-                for line in response_text.split('\n'):
-                    if line.startswith('data:'):
-                        json_str = line[5:].strip()
-                        try:
-                            data = json.loads(json_str)
-                            
-                            if "result" in data:
-                                result = data["result"]
-                                if isinstance(result, dict) and result.get("isError"):
-                                    if "content" in result and len(result["content"]) > 0:
-                                        error_text = result["content"][0].get("text", "Unknown error")
-                                        if "invalid" in error_text.lower() and "location" in error_text.lower():
-                                            error_text += "\n\nHint: Try specifying the location more precisely, e.g., 'Minneapolis, MN', 'London, UK', or use a zip code."
-                                        return f"Weather service error: {error_text}"
-                                
-                                if "content" in result and len(result["content"]) > 0:
-                                    return result["content"][0].get("text", str(result))
-                                return str(result)
-                        except json.JSONDecodeError:
-                            pass
-                            
-                return f"Error: Could not parse forecast response"
-        else:
-            return f"Error: XWeather API returned status {response.status_code}"
-            
-    except Exception as e:
-        return f"Error getting forecast: {str(e)}"
 
-def get_precipitation_timing(location: str):
-    """
-    Gets timing information for upcoming precipitation (rain, snow, etc.) in the next hours to days.
-    Use this tool when the user asks "when will it rain?", "when will it stop raining?", or needs precipitation timing for outdoor activities.
-    
-    Args:
-        location (str): The location to get precipitation timing for (city, state/country, or zip code)
-    
-    Returns:
-        str: Start/stop timing and duration of upcoming precipitation
-    """
-    try:
-        import requests
-        
-        xweather_id = os.getenv("XWEATHER_MCP_ID")
-        xweather_secret = os.getenv("XWEATHER_MCP_SECRET")
-        
-        if not xweather_id or not xweather_secret:
-            return "Error: XWeather API credentials not configured."
-        
-        mcp_url = "https://mcp.api.xweather.com/mcp"
-        auth_string = f"{xweather_id}_{xweather_secret}"
-        
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "tools/call",
-            "params": {
-                "name": "xweather_get_forecast_precipitation_timing",
-                "arguments": {
-                    "location": location
-                }
-            }
-        }
-        
-        headers = {
-            "Authorization": f"Bearer {auth_string}",
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream"
-        }
-        
-        response = requests.post(mcp_url, json=payload, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            response_text = response.text
-            if "data:" in response_text:
-                for line in response_text.split('\n'):
-                    if line.startswith('data:'):
-                        json_str = line[5:].strip()
-                        data = json.loads(json_str)
-                        
-                        if "result" in data:
-                            result = data["result"]
-                            if isinstance(result, dict) and result.get("isError"):
-                                if "content" in result and len(result["content"]) > 0:
-                                    error_text = result["content"][0].get("text", "Unknown error")
-                                    if "invalid" in error_text.lower() and "location" in error_text.lower():
-                                        error_text += "\n\nHint: Try specifying the location more precisely, e.g., 'Minneapolis, MN', 'London, UK', or use a zip code."
-                                    return f"Weather service error: {error_text}"
-                            
-                            if "content" in result and len(result["content"]) > 0:
-                                return result["content"][0].get("text", str(result))
-                            return str(result)
-                        
-                return f"Error: Could not parse precipitation timing response"
-        else:
-            return f"Error: XWeather API returned status {response.status_code}"
-            
-    except Exception as e:
-        return f"Error getting precipitation timing: {str(e)}"
 
 # --- 4. ROUTES ---
 
@@ -4005,17 +4108,10 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 current_instruction += """\n\n- You have access to a 'get_coordinates' tool. 
                 - Use it to find the latitude and longitude of locations."""
 
-                tools.append(get_weather)
-                current_instruction += """\n\n- You have access to a 'get_weather' tool. 
-                Use it when the user asks about current weather, temperature, or conditions for any location."""
+                tools.append(get_open_meteo_weather)
+                current_instruction += """\n\n- You have access to a 'get_open_meteo_weather' tool. 
+                Use it when the user asks about current weather, temperature, wind, humidity, or forecasts for any location. It uses the Open-Meteo API."""
 
-                tools.append(get_forecast_weather)
-                current_instruction += """\n\n- You have access to a 'get_forecast_weather' tool. 
-                - Use it for multi-day weather forecasts, planning, event scheduling, or when the user asks about future weather."""
-
-                tools.append(get_precipitation_timing)
-                current_instruction += """\n\n- You have access to a 'get_precipitation_timing' tool. 
-                - Use it when the user asks 'when will it rain?', 'when will it stop raining?', or needs precipitation timing information."""
                 
                 tools.append(add_user_memory)
                 current_instruction += """\n\n- You have access to an 'add_user_memory' tool. 
@@ -4436,12 +4532,14 @@ Technical Specifications for the workout .zwo Files (Critical)
                                 api_response = get_user_timezone()
                             elif fn_name == "get_coordinates":
                                 api_response = get_coordinates(fn_args.get("location"))
-                            elif fn_name == "get_weather":
-                                api_response = get_weather(fn_args.get("location"))
-                            elif fn_name == "get_forecast_weather":
-                                api_response = get_forecast_weather(fn_args.get("location"))
-                            elif fn_name == "get_precipitation_timing":
-                                api_response = get_precipitation_timing(fn_args.get("location"))
+                            elif fn_name == "get_open_meteo_weather":
+                                api_response = get_open_meteo_weather(fn_args.get("location"))
+                            # elif fn_name == "get_weather":
+                            #     api_response = get_weather(fn_args.get("location"))
+                            # elif fn_name == "get_forecast_weather":
+                            #     api_response = get_forecast_weather(fn_args.get("location"))
+                            # elif fn_name == "get_precipitation_timing":
+                            #     api_response = get_precipitation_timing(fn_args.get("location"))
                             elif fn_name == "wolfram_alpha_query":
                                 api_response = wolfram_alpha_query(fn_args.get("query"))
                             elif fn_name == "add_user_memory":
@@ -4635,7 +4733,7 @@ Technical Specifications for the workout .zwo Files (Critical)
                                             # Display chart to user immediately
                                             yield format_sse(f'<div class="mb-2"><img src="{chart_path}" alt="Generated Chart" class="max-w-full h-auto rounded-lg shadow-md"/></div>')
                                             
-                                            history_parts.append(types.Part(text=f"![Generated Chart]({chart_path})"))
+                                            history_parts.append(f"![Generated Chart]({chart_path})")
                                         
                                         # 2. Handle HTML Link (Interactive)
                                         if "html_path" in resp_data:
@@ -4649,7 +4747,7 @@ Technical Specifications for the workout .zwo Files (Critical)
                                             
                                             # Add to history (using special syntax we added preprocessing for, or just a link)
                                             # We'll use the link format since we have the image above
-                                            history_parts.append(types.Part(text=f"\nInteractive Version: [{html_path}]({html_path})"))
+                                            history_parts.append(f"\nInteractive Version: [{html_path}]({html_path})")
                                         
                                         # 3. Finalize
                                         if history_parts:
