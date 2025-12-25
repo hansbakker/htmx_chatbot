@@ -340,6 +340,7 @@ def init_db():
                 file_contents TEXT,
                 file_contents_confirmed TEXT,
                 training_plan_days_id INTEGER,
+                activity_icu_id TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY(user_id) REFERENCES users(id),
                 FOREIGN KEY(training_plan_days_id) REFERENCES training_plan_days(id) ON DELETE CASCADE
@@ -379,6 +380,7 @@ def init_db():
                     file_contents TEXT,
                     file_contents_confirmed TEXT,
                     training_plan_days_id INTEGER,
+                    activity_icu_id TEXT,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(user_id) REFERENCES users(id),
                     FOREIGN KEY(training_plan_days_id) REFERENCES training_plan_days(id) ON DELETE CASCADE
@@ -401,6 +403,37 @@ def init_db():
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS activities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                icu_activity_id TEXT UNIQUE,
+                start_date_local TEXT,
+                type TEXT,
+                icu_ctl REAL,
+                icu_atl REAL,
+                icu_efficiency_factor REAL,
+                decoupling REAL,
+                icu_pm_ftp_watts INTEGER,
+                icu_zone_times TEXT,
+                icu_resting_hr INTEGER,
+                carbs_used INTEGER,
+                workout_id INTEGER,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            )
+        """)
+
+        # Migration: Add cross-reference columns
+        try:
+            conn.execute("ALTER TABLE workouts ADD COLUMN activity_icu_id TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE activities ADD COLUMN workout_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
 
         # Weeks with CASCADE
         conn.execute("""
@@ -2483,17 +2516,19 @@ def get_training_plan_week(plan_id: int, week_number: int):
         print(f"Error in get_training_plan_week: {str(e)}")
         return f"Error: {str(e)}"
 
-def get_intervals_icu_activities(oldest: str, newest: str):
+def get_intervals_icu_activities(oldest: str, newest: str, fields: str = None):
     """
-    Retrieves cycling activities from Intervals.icu for a specific time span.
+    Retrieves cycling activities from Intervals.icu for a specific time span and saves them to the local database.
     
     Args:
         oldest (str): The oldest date/time to retrieve (ISO format, e.g., "2025-12-15T00:00:00").
         newest (str): The newest date/time to retrieve (ISO format, e.g., "2025-12-16T00:00:00").
                       Max span: 14 days.
+        fields (str, optional): Comma-separated list of field names to include in the returned objects. 
+                                Default fields: id, start_date_local, type, icu_ctl, icu_atl, icu_efficiency_factor, decoupling, icu_pm_ftp_watts, icu_zone_times, icu_resting_hr, carbs_used.
     
     Returns:
-        str: A JSON-formatted string containing the filtered activities or an error message.
+        str: A JSON-formatted string containing the filtered activities and confirmation of storage, or an error message.
     """
     import json
     import requests
@@ -2525,7 +2560,21 @@ def get_intervals_icu_activities(oldest: str, newest: str):
             return "Error: Intervals.icu credentials not found for this user. Please configure them in settings."
         
         # 2. Call Intervals.icu API
-        url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities?oldest={oldest}&newest={newest}"
+        # Default fields to return to LLM and store in DB
+        default_fields = [
+            "id", "start_date_local", "type", "icu_ctl", "icu_atl", 
+            "icu_efficiency_factor", "decoupling", "icu_pm_ftp_watts", 
+            "icu_zone_times", "icu_resting_hr", "carbs_used"
+        ]
+        
+        # Fields to actually return to LLM in this call
+        requested_fields = [f.strip() for f in fields.split(",")] if fields else default_fields
+        
+        # Merge requested fields with default fields for the API call to ensure DB storage
+        api_fields_list = list(set(default_fields + requested_fields))
+        api_fields_str = ",".join(api_fields_list)
+        
+        url = f"https://intervals.icu/api/v1/athlete/{athlete_id}/activities?oldest={oldest}&newest={newest}&fields={api_fields_str}"
         
         response = requests.get(
             url, 
@@ -2538,22 +2587,199 @@ def get_intervals_icu_activities(oldest: str, newest: str):
         
         activities = response.json()
         
-        # 3. Filter requested fields
+        # 3. Filter and store in DB
         filtered_activities = []
-        fields_to_keep = [
-            "id", "start_date_local", "type", "icu_ctl", "icu_atl", 
-            "icu_efficiency_factor", "decoupling", "icu_pm_ftp_watts", 
-            "icu_zone_times", "icu_resting_hr", "carbs_used"
-        ]
         
-        for act in activities:
-            filtered_act = {field: act.get(field) for field in fields_to_keep}
-            filtered_activities.append(filtered_act)
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            for act in activities:
+                # Filter requested fields for the LLM response
+                filtered_act = {field: act.get(field) for field in requested_fields}
+                
+                # Check for potential workout matches (hint logic)
+                # Only if not already linked in the DB
+                icu_activity_id = str(act.get("id"))
+                cursor = conn.execute("SELECT workout_id FROM activities WHERE icu_activity_id = ?", (icu_activity_id,))
+                existing_row = cursor.fetchone()
+                current_workout_id = existing_row['workout_id'] if existing_row else None
+                
+                if current_workout_id:
+                    filtered_act['linked_workout_id'] = current_workout_id
+                else:
+                    # Look for matching workouts by date
+                    act_date = act.get("start_date_local", "").split("T")[0]
+                    if act_date:
+                        cursor = conn.execute("""
+                            SELECT id, filename, start_date_local 
+                            FROM workouts 
+                            WHERE user_id = ? 
+                            AND start_date_local LIKE ?
+                        """, (user_id, f"{act_date}%"))
+                        matches = cursor.fetchall()
+                        if matches:
+                            filtered_act['potential_matches'] = [
+                                {"workout_id": m['id'], "workout_filename": m['filename'], "workout_date": m['start_date_local']}
+                                for m in matches
+                            ]
+                
+                filtered_activities.append(filtered_act)
+                
+                # Store in database
+                conn.execute("""
+                    INSERT OR REPLACE INTO activities (
+                        user_id, icu_activity_id, start_date_local, type, 
+                        icu_ctl, icu_atl, icu_efficiency_factor, decoupling, 
+                        icu_pm_ftp_watts, icu_zone_times, icu_resting_hr, carbs_used,
+                        workout_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
+                        COALESCE((SELECT workout_id FROM activities WHERE icu_activity_id = ?), NULL)
+                    )
+                """, (
+                    user_id, 
+                    icu_activity_id, 
+                    act.get("start_date_local"), 
+                    act.get("type"),
+                    act.get("icu_ctl"), 
+                    act.get("icu_atl"),
+                    act.get("icu_efficiency_factor"), 
+                    act.get("decoupling"),
+                    act.get("icu_pm_ftp_watts"),
+                    json.dumps(act.get("icu_zone_times")) if act.get("icu_zone_times") else None,
+                    act.get("icu_resting_hr"),
+                    act.get("carbs_used"),
+                    icu_activity_id
+                ))
+            conn.commit()
             
         return json.dumps(filtered_activities, indent=2)
             
     except Exception as e:
         print(f"Error in get_intervals_icu_activities: {str(e)}")
+        return f"Error: {str(e)}"
+
+def get_activities_from_db(start_date: str, end_date: str):
+    """
+    Retrieves cycling activities stored in the local database for a specific date range.
+    
+    Args:
+        start_date (str): The start of the date range (ISO format, e.g., "2025-12-15").
+        end_date (str): The end of the date range (ISO format, e.g., "2025-12-16").
+    
+    Returns:
+        str: A JSON-formatted string containing the activities or an error message.
+    """
+    import json
+    import sqlite3
+    
+    session_id = session_id_ctx.get()
+    user_id = None
+    
+    try:
+        # 1. Resolve user_id
+        if session_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row[0]
+                    
+        if not user_id:
+            return "Error: User not found in session."
+
+        # 2. Query activities from DB
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM activities 
+                WHERE user_id = ? 
+                AND start_date_local >= ? 
+                AND start_date_local <= ?
+                ORDER BY start_date_local ASC
+            """, (user_id, f"{start_date}T00:00:00", f"{end_date}T23:59:59"))
+            
+            rows = cursor.fetchall()
+            activities = [dict(row) for row in rows]
+            
+            # Parse JSON fields and add hints
+            for act in activities:
+                if act.get('icu_zone_times'):
+                    try:
+                        act['icu_zone_times'] = json.loads(act['icu_zone_times'])
+                    except:
+                        pass
+                
+                # Add linking hints if not yet linked
+                if not act.get('workout_id'):
+                    act_date = act.get("start_date_local", "").split("T")[0]
+                    if act_date:
+                        m_cursor = conn.execute("""
+                            SELECT id, filename, start_date_local 
+                            FROM workouts 
+                            WHERE user_id = ? 
+                            AND start_date_local LIKE ?
+                        """, (user_id, f"{act_date}%"))
+                        matches = m_cursor.fetchall()
+                        if matches:
+                            act['potential_matches'] = [
+                                {"workout_id": m['id'], "workout_filename": m['filename'], "workout_date": m['start_date_local']}
+                                for m in matches
+                            ]
+            
+            return json.dumps(activities, indent=2)
+            
+    except Exception as e:
+        print(f"Error in get_activities_from_db: {str(e)}")
+        return f"Error: {str(e)}"
+
+def link_activity_to_workout(icu_activity_id: str, workout_id: int):
+    """
+    Manually links a specific Intervals.icu activity to a local workout record.
+    Should only be called after the user confirms the activity is for the planned workout.
+    
+    Args:
+        icu_activity_id (str): The Intervals.icu activity ID (e.g., "12345").
+        workout_id (int): The local database ID of the workout.
+    
+    Returns:
+        str: A confirmation message or an error message.
+    """
+    import sqlite3
+    
+    session_id = session_id_ctx.get()
+    user_id = None
+    
+    try:
+        # 1. Resolve user_id
+        if session_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row[0]
+                    
+        if not user_id:
+            return "Error: User not found in session."
+
+        # 2. Update both tables
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            # Check ownership of both
+            cursor = conn.execute("SELECT id FROM workouts WHERE id = ? AND user_id = ?", (workout_id, user_id))
+            if not cursor.fetchone():
+                return f"Error: Workout {workout_id} not found or does not belong to you."
+            
+            cursor = conn.execute("SELECT id FROM activities WHERE icu_activity_id = ? AND user_id = ?", (icu_activity_id, user_id))
+            if not cursor.fetchone():
+                return f"Error: Activity {icu_activity_id} not found in local database or does not belong to you."
+            
+            # Perform linking
+            conn.execute("UPDATE workouts SET activity_icu_id = ? WHERE id = ?", (icu_activity_id, workout_id))
+            conn.execute("UPDATE activities SET workout_id = ? WHERE icu_activity_id = ?", (workout_id, icu_activity_id))
+            conn.commit()
+            
+            return f"Successfully linked activity {icu_activity_id} to workout {workout_id}."
+            
+    except Exception as e:
+        print(f"Error in link_activity_to_workout: {str(e)}")
         return f"Error: {str(e)}"
 
 def get_training_plan_summary(plan_id: int = None):
@@ -4374,7 +4600,20 @@ DO NOT add coach notes to clearly unrelated conversation messages.
                     tools.append(get_intervals_icu_activities)
                     current_instruction += """\n\n- You have access to a 'get_intervals_icu_activities' tool. 
                     - Use it to retrieve actual cycling activities for a specific time span. 
-                    - Arguments: oldest (ISO str), newest (ISO str). Typically use today or a range up to 14 days in the past."""
+                    - Arguments: oldest (ISO str), newest (ISO str), fields (optional comma-separated string of field names to include in results). 
+                      Typically use today or a range up to 14 days in the past."""
+
+                    tools.append(get_activities_from_db)
+                    current_instruction += """\n\n- You have access to a 'get_activities_from_db' tool. 
+                    - Use it to retrieve cycling activities already stored in the local database for a specific date range. 
+                    - Arguments: start_date (ISO str), end_date (ISO str)."""
+
+                    tools.append(link_activity_to_workout)
+                    current_instruction += """\n\n- You have access to a 'link_activity_to_workout' tool. 
+                    - When you retrieve activities, they may contain 'potential_matches' with workout IDs. 
+                    - If you see a potential match, inform the user and ask if they would like to link the activity to that specific planned workout. 
+                    - Only call this tool AFTER the user explicitly confirms the link. 
+                    - Arguments: icu_activity_id (str), workout_id (int)."""
 
                 
             else:
@@ -4647,7 +4886,11 @@ DO NOT add coach notes to clearly unrelated conversation messages.
                             elif fn_name == "query_training_plan_stats":
                                 api_response = query_training_plan_stats(fn_args.get("plan_id"), fn_args.get("start_date"), fn_args.get("end_date"))
                             elif fn_name == "get_intervals_icu_activities":
-                                api_response = get_intervals_icu_activities(fn_args.get("oldest"), fn_args.get("newest"))
+                                api_response = get_intervals_icu_activities(fn_args.get("oldest"), fn_args.get("newest"), fn_args.get("fields"))
+                            elif fn_name == "get_activities_from_db":
+                                api_response = get_activities_from_db(fn_args.get("start_date"), fn_args.get("end_date"))
+                            elif fn_name == "link_activity_to_workout":
+                                api_response = link_activity_to_workout(fn_args.get("icu_activity_id"), fn_args.get("workout_id"))
                             elif fn_name == "modify_training_plan_start_date":
                                 api_response = modify_training_plan_start_date(fn_args.get("plan_id"), fn_args.get("new_start_date"))
                             else:
@@ -5324,8 +5567,7 @@ async def get_memories_ui(user_id: int = Depends(get_current_user_id)):
                     <div class="flex-1">
                         <textarea class="w-full bg-transparent border-none focus:ring-0 text-sm text-gray-800 dark:text-gray-200 resize-none p-0 overflow-hidden" 
                                   name="content"
-                                  hx-post="/save-memory/{m['id']}"
-                                  hx-trigger="keyup changed delay:500ms"
+                                  hx-post="/save-memory/{m['id']}"                                  hx-trigger="keyup changed delay:500ms"
                                   oninput="this.style.height = ''; this.style.height = this.scrollHeight + 'px'"
                                   rows="1">{m['content']}</textarea>
                         <span class="text-[10px] text-gray-400 dark:text-gray-500 mt-1 block">Saved on {m['created_at']}</span>
