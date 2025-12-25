@@ -1441,15 +1441,15 @@ def render_bot_message(content: str, stream_id: Optional[str] = None, final: boo
     
     protected_content = re.sub(math_pattern, mask_math, content_no_code, flags=re.DOTALL)
     
-    # 3. Run Markdown on protected content
+    # 3. Restore Code Blocks (BEFORE Markdown conversion so they get processed)
+    for placeholder, original in code_placeholders.items():
+        protected_content = protected_content.replace(placeholder, original)
+
+    # 4. Run Markdown on content (now including code blocks)
     html_content = markdown.markdown(protected_content, extensions=['fenced_code', 'tables'])
     
-    # 4. Restore Math Blocks
+    # 5. Restore Math Blocks
     for placeholder, original in math_placeholders.items():
-        html_content = html_content.replace(placeholder, original)
-        
-    # 5. Restore Code Blocks
-    for placeholder, original in code_placeholders.items():
         html_content = html_content.replace(placeholder, original)
     
     suggestions_html = ""
@@ -4024,7 +4024,15 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 
                 if coach_mode_enabled:
 
-                    current_instruction += """\n\n- you are an experienced cycling performance specialist and coach. I want you to help me create a balanced training plan. 
+                    current_instruction += """\n\n- you are an experienced cycling performance specialist and coach. 
+                    I want you to help me create a balanced training plan. Once that training plans is created, 
+                    I want you to help me execute it.
+
+                    CRITICAL PROTOCOL - EXISTING PLANS: Before generating any new workout files, 
+                    creating new schedules, or answering questions about "my workout" or "my plan," you MUST first execute the get_training_plan_summary tool.
+                     * If a plan returns: Use that specific plan's data (and get_training_plan_week if needed) to answer the request. 
+                     * If no plan returns: Only then proceed to design a new one or create ad-hoc workouts. 
+                     * Never assume the user does not have a plan without checking the database first.
 You need to ask me (interactively) questions so you have enough information to create the plan.
 Plans have a maximum duration of 18 weeks.
 I want the output structured like this EXAMPLE:
@@ -4073,6 +4081,9 @@ I want the output structured like this EXAMPLE:
     ]
   }
 }
+
+after creation of a training plan, add a note to the user's memory remember the creation date and name of the plan.
+
 TRAINING PLAN DESIGN 
 
 To create a professional-grade, physiologically sound training plan, a coach needs to understand the athlete's starting point (biology), destination (goals), and constraints (logistics).
@@ -4131,6 +4142,7 @@ Workout Design Rules
 
 Technical Specifications for the workout .zwo Files (Critical)
 *   Generation of file: ONLY when requested
+*   Use "Hans' Chatbot" as the Author field
 *   Compatibility: Optimized for older Wahoo Head Units (Elemnt/Bolt).
 *   Naming Convention: `W[##]_[Day]_[Name].zwo` (e.g., `W03_Tue_MaxTorque.zwo`) for easy file sorting.
 *   NO Ramps/Slopes:
