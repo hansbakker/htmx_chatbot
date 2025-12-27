@@ -1,0 +1,21 @@
+{
+    "default": {
+        "welcome_message": "Welcome, {user_name}! I'm your AI assistant. How can I help you today?",
+        "prompts": [
+            "What is the current weather in Amsterdam?",
+            "Explain quantum entanglement like I'm five.",
+            "Write a FastAPI endpoint for file uploads.",
+            "Change our conversation to Dutch"
+        ]
+    },
+    "coach_mode": {
+        "welcome_message": "Hello {user_name}! Ready to analyze some workouts or plan the next training block?",
+        "prompts": [
+            "Create a new training plan",
+            "Prepare today's workout",
+            "Analyze my recent activities",
+            "Show me my progress",
+            "Change our conversation to Dutch"
+        ]
+    }
+}

@@ -308,8 +308,36 @@
 				{% if chat_history %}
 				{{ chat_history | safe }}
 				{% else %}
-				<div class="text-center text-gray-400 dark:text-gray-500 text-sm mt-10">
-					<p>Let's start a conversation ...</p>
+				<div id="welcome-screen"
+					class="flex flex-col items-center justify-center min-h-[60vh] text-center px-4">
+					<div
+						class="bg-blue-50/50 dark:bg-blue-900/10 p-8 rounded-3xl border border-blue-100/50 dark:border-blue-800/30 max-w-2xl w-full">
+						<div
+							class="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg shadow-blue-500/20">
+							<img src="/static/chatbot_icon.png" alt="Icon"
+								class="w-10 h-10 object-contain brightness-0 invert">
+						</div>
+						<h2 class="text-2xl font-bold text-gray-800 dark:text-gray-100 mb-4 tracking-tight">
+							{{ welcome_data.message }}
+						</h2>
+						<p class="text-gray-500 dark:text-gray-400 mb-8 text-sm">
+							Choose a starter prompt below or type your own message to begin.
+						</p>
+						<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+							{% for prompt in welcome_data.prompts %}
+							<button onclick="setInput(this.getAttribute('data-prompt'))" data-prompt="{{ prompt }}"
+								class="text-sm text-left px-5 py-4 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-2xl hover:border-blue-500 dark:hover:border-blue-400 hover:shadow-xl hover:shadow-blue-500/5 transition-all duration-200 text-gray-700 dark:text-gray-200 group flex items-center justify-between">
+								<span class="truncate">{{ prompt }}</span>
+								<svg xmlns="http://www.w3.org/2000/svg"
+									class="h-4 w-4 text-blue-500 opacity-0 group-hover:opacity-100 transition-all transform group-hover:translate-x-1"
+									fill="none" viewBox="0 0 24 24" stroke="currentColor">
+									<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+										d="M13 7l5 5m0 0l-5 5m5-5H6" />
+								</svg>
+							</button>
+							{% endfor %}
+						</div>
+					</div>
 				</div>
 				{% endif %}
 			</div>

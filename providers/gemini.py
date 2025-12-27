@@ -20,7 +20,7 @@ class GeminiProvider(LLMProvider):
         print(f"Uploading file to Gemini: {file_path} ({mime_type})")
         
         # In google-genai, we use client.files.upload
-        uploaded_file = self.client.files.upload(path=file_path, config={'mime_type': mime_type})
+        uploaded_file = self.client.files.upload(file=file_path, config={'mime_type': mime_type})
         
         if wait_for_active:
             while uploaded_file.state == "PROCESSING":
@@ -47,6 +47,12 @@ class GeminiProvider(LLMProvider):
             for part in parts:
                 if isinstance(part, str):
                     clean_parts.append(types.Part(text=part))
+                elif hasattr(part, 'uri') and hasattr(part, 'mime_type') and not isinstance(part, types.Part):
+                    # It's an uploaded file from Files API (google.genai.types.File)
+                    # We must wrap it in a FileData part for the backend
+                    clean_parts.append(types.Part(
+                        file_data=types.FileData(file_uri=part.uri, mime_type=part.mime_type)
+                    ))
                 else:
                     # Assume it's already a Part-like object or compliant dict
                     clean_parts.append(part)

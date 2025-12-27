@@ -1048,6 +1048,24 @@ async def get_home(request: Request, response: Response):
         if result:
             current_chat_title = result[0]
 
+    # Load Starter Prompts configuration
+    welcome_data = {}
+    try:
+        with open("starter_prompts.json", "r") as f:
+            all_starter_configs = json.load(f)
+            
+            # Select mode
+            mode_key = "coach_mode" if user_settings.get("coach_mode_enabled") else "default"
+            mode_config = all_starter_configs.get(mode_key, all_starter_configs.get("default", {}))
+            
+            # Personalize
+            user_display_name = user_info.get("name", "there") if user_info else "there"
+            welcome_data["message"] = mode_config.get("welcome_message", "").replace("{user_name}", user_display_name)
+            welcome_data["prompts"] = mode_config.get("prompts", [])
+    except Exception as e:
+        print(f"Error loading starter prompts: {e}")
+        welcome_data = {"message": "Welcome!", "prompts": []}
+
     response = templates.TemplateResponse("index.html", {
         "request": request, 
         "chat_history": chat_history_html,
@@ -1055,7 +1073,8 @@ async def get_home(request: Request, response: Response):
         "current_session_id": session_id,
         "current_chat_title": current_chat_title,
         "user": user_info, # Pass user info to template
-        "user_settings": user_settings
+        "user_settings": user_settings,
+        "welcome_data": welcome_data
     })
     
     # Set cookie if it was missing
@@ -2861,6 +2880,110 @@ def get_activities_from_db(start_date: str, end_date: str):
         print(f"Error in get_activities_from_db: {str(e)}")
         return f"Error: {str(e)}"
 
+def get_most_recent_activity():
+    """
+    Retrieves the most recent cycling activity for the user from the local database.
+    """
+    import json
+    import sqlite3
+    
+    session_id = session_id_ctx.get()
+    user_id = None
+    
+    try:
+        # 1. Resolve user_id
+        if session_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row[0]
+                    
+        if not user_id:
+            return "Error: User not found in session."
+
+        # 2. Query most recent activity
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM activities 
+                WHERE user_id = ? 
+                ORDER BY start_date_local DESC 
+                LIMIT 1
+            """, (user_id,))
+            
+            row = cursor.fetchone()
+            if not row:
+                return "No activities found in the local database."
+            
+            act = dict(row)
+            # Parse JSON fields
+            json_fields = ['icu_zone_times', 'icu_hr_zone_times', 'icu_power_zones', 'icu_hr_zones', 'icu_achievements']
+            for field in json_fields:
+                if act.get(field):
+                    try:
+                        act[field] = json.loads(act[field])
+                    except:
+                        pass
+            
+            return json.dumps(act, indent=2)
+            
+    except Exception as e:
+        print(f"Error in get_most_recent_activity: {str(e)}")
+        return f"Error: {str(e)}"
+
+def get_new_activities_from_intervals():
+    """
+    Checks for new activities logged in Intervals.icu since the most recent activity in the local database.
+    Fetches and stores any new activities found.
+    """
+    import datetime
+    import json
+    import sqlite3
+    
+    session_id = session_id_ctx.get()
+    user_id = None
+    
+    try:
+        # 1. Resolve user_id
+        if session_id:
+            with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+                cursor = conn.execute("SELECT user_id FROM conversations WHERE id = ?", (session_id,))
+                row = cursor.fetchone()
+                if row:
+                    user_id = row[0]
+                    
+        if not user_id:
+            return "Error: User not found in session."
+
+        # 2. Find latest activity timestamp in DB
+        latest_date = None
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            cursor = conn.execute("SELECT MAX(start_date_local) FROM activities WHERE user_id = ?", (user_id,))
+            row = cursor.fetchone()
+            if row and row[0]:
+                latest_date = row[0]
+        
+        # 3. Determine 'oldest' for fetch
+        if latest_date:
+            # Add 1 second to latest date to avoid duplicates if possible, 
+            # though get_intervals_icu_activities handles duplicates via INSERT OR REPLACE
+            oldest = latest_date
+        else:
+            # Fallback to 14 days ago if no data
+            oldest = (datetime.datetime.now() - datetime.timedelta(days=14)).strftime("%Y-%m-%d")
+
+        # 4. Fetch new activities
+        # We reuse get_intervals_icu_activities internal logic or just call it
+        newest = datetime.datetime.now().strftime("%Y-%m-%d")
+        result = get_intervals_icu_activities(oldest=oldest, newest=newest)
+        
+        return result
+            
+    except Exception as e:
+        print(f"Error in get_new_activities_from_intervals: {str(e)}")
+        return f"Error: {str(e)}"
+
 def link_activity_to_workout(icu_activity_id: str, workout_id: int):
     """
     Manually links a specific Intervals.icu activity to a local workout record.
@@ -4178,7 +4301,7 @@ async def stream_response(request: Request, prompt: str, session_id: str = Cooki
                 if history_filtered:
                     messages_payload = sanitized_msgs
 
-            if not has_file_in_context:
+            #if not has_file_in_context:
                 if tavily_client:
                     tools.append(search_web)
                     current_instruction += """\n\n- You have access to a 'search_web' tool. You must use it whenever the user asks for current information, news, or facts you don't know. 
@@ -4517,6 +4640,14 @@ carbs_used: Use this field to correlate "True TSS" (Adjusted) with fuel burn to 
                     - Use it to retrieve cycling activities already stored in the local database for a specific date range. 
                     - Arguments: start_date (ISO str), end_date (ISO str)."""
 
+                    tools.append(get_most_recent_activity)
+                    current_instruction += """\n\n- You have access to a 'get_most_recent_activity' tool. 
+                    - Use it to retrieve full details of the very latest activity logged in the local database."""
+
+                    tools.append(get_new_activities_from_intervals)
+                    current_instruction += """\n\n- You have access to a 'get_new_activities_from_intervals' tool. 
+                    - Use it to synchronize new activities from Intervals.icu. It automatically finds the last activity in the database and fetches everything logged since then."""
+
                     tools.append(link_activity_to_workout)
                     current_instruction += """\n\n- You have access to a 'link_activity_to_workout' tool. 
                     - When you retrieve activities, they may contain 'potential_matches' with workout IDs. 
@@ -4798,6 +4929,10 @@ carbs_used: Use this field to correlate "True TSS" (Adjusted) with fuel burn to 
                                 api_response = get_intervals_icu_activities(fn_args.get("oldest"), fn_args.get("newest"), fn_args.get("fields"))
                             elif fn_name == "get_activities_from_db":
                                 api_response = get_activities_from_db(fn_args.get("start_date"), fn_args.get("end_date"))
+                            elif fn_name == "get_most_recent_activity":
+                                api_response = get_most_recent_activity()
+                            elif fn_name == "get_new_activities_from_intervals":
+                                api_response = get_new_activities_from_intervals()
                             elif fn_name == "link_activity_to_workout":
                                 api_response = link_activity_to_workout(fn_args.get("icu_activity_id"), fn_args.get("workout_id"))
                             elif fn_name == "modify_training_plan_start_date":
