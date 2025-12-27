@@ -308,25 +308,45 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 file_path TEXT NOT NULL,
+                name TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Migration: Add name column to generated_files
+        try:
+            conn.execute("ALTER TABLE generated_files ADD COLUMN name TEXT")
+        except sqlite3.OperationalError:
+            pass
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS generated_code (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 file_path TEXT NOT NULL,
+                name TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Migration: Add name column to generated_code
+        try:
+            conn.execute("ALTER TABLE generated_code ADD COLUMN name TEXT")
+        except sqlite3.OperationalError:
+            pass
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS uploaded_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL,
                 file_path TEXT,
+                name TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Migration: Add name column to uploaded_files
+        try:
+            conn.execute("ALTER TABLE uploaded_files ADD COLUMN name TEXT")
+        except sqlite3.OperationalError:
+            pass
 
         # Workouts with CASCADE
         conn.execute("""
@@ -840,7 +860,7 @@ def get_history(session_id: str) -> List[Dict[str, str]]:
     return history
 
 @retry_on_db_lock()
-def save_message(session_id: str, role: str, content: str, image_path: Optional[str] = None, mime_type: Optional[str] = None, gemini_uri: Optional[str] = None, user_id: Optional[int] = None):
+def save_message(session_id: str, role: str, content: str, image_path: Optional[str] = None, mime_type: Optional[str] = None, gemini_uri: Optional[str] = None, user_id: Optional[int] = None, file_name: Optional[str] = None):
     with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
         # Ensure conversation exists
         cursor = conn.execute("SELECT id, user_id FROM conversations WHERE id = ?", (session_id,))
@@ -865,7 +885,7 @@ def save_message(session_id: str, role: str, content: str, image_path: Optional[
                  new_title = content[:30] + "..." if len(content) > 30 else content
                  conn.execute("UPDATE conversations SET title = ? WHERE id = ?", (new_title, session_id))
         if image_path:
-            conn.execute("INSERT INTO uploaded_files (session_id, file_path) VALUES (?, ?)", (session_id, image_path[1:]))
+            conn.execute("INSERT INTO uploaded_files (session_id, file_path, name) VALUES (?, ?, ?)", (session_id, image_path[1:], file_name))
         conn.execute(
             "INSERT INTO messages (session_id, role, content, image_path, mime_type, gemini_uri) VALUES (?, ?, ?, ?, ?, ?)",
             (session_id, role, content, image_path, mime_type, gemini_uri)
@@ -1370,6 +1390,75 @@ async def get_archived_chats(user_id: int = Depends(get_current_user_id)):
     except Exception as e:
         return HTMLResponse(f"<div>Error: {str(e)}</div>", status_code=500)
 
+def render_generated_files_html(session_id: str) -> str:
+    """Helper to render the files list for a session."""
+    try:
+        files = []
+        with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
+            conn.row_factory = sqlite3.Row
+            # 1. Generated Files
+            cursor = conn.execute(
+                "SELECT file_path, name, created_at, 'generated' as type FROM generated_files WHERE session_id = ? ORDER BY created_at DESC", 
+                (session_id,)
+            )
+            files.extend([dict(row) for row in cursor.fetchall()])
+            # 2. Generated Code
+            cursor = conn.execute(
+                "SELECT file_path, name, created_at, 'code' as type FROM generated_code WHERE session_id = ? ORDER BY created_at DESC", 
+                (session_id,)
+            )
+            files.extend([dict(row) for row in cursor.fetchall()])
+            # 3. Uploaded Files
+            cursor = conn.execute(
+                "SELECT file_path, name, created_at, 'upload' as type FROM uploaded_files WHERE session_id = ? ORDER BY created_at DESC", 
+                (session_id,)
+            )
+            files.extend([dict(row) for row in cursor.fetchall()])
+        
+        if not files:
+            return '<div class="text-gray-500 text-sm py-4 text-center">No files found for this session</div>'
+            
+        files.sort(key=lambda x: x['created_at'], reverse=True)
+        html = '<div class="space-y-2">'
+        for f in files:
+            path = f['file_path']
+            url_path = path if path.startswith('/') else '/' + path
+            display_name = f['name'] if f.get('name') else os.path.basename(path)
+            icon = "📄"
+            if path.endswith('.png') or path.endswith('.jpg') or path.endswith('.jpeg'):
+                icon = "📊" if 'chart' in display_name.lower() or 'plot' in display_name.lower() or 'chart' in path.lower() else "🖼️"
+            elif path.endswith('.pdf'):
+                icon = "📕"
+            elif path.endswith('.py') or f['type'] == 'code':
+                icon = "💻"
+            elif path.endswith('.csv'):
+                icon = "📈"
+            html += f"""
+            <a href="{url_path}" target="_blank" class="flex items-center gap-3 p-3 bg-gray-50 dark:bg-gray-800 hover:bg-blue-50 dark:hover:bg-blue-900/20 rounded-xl border border-gray-100 dark:border-gray-700 transition-all group">
+                <span class="text-2xl group-hover:scale-110 transition-transform">{icon}</span>
+                <div class="flex-1 min-w-0">
+                    <p class="text-sm font-medium text-gray-700 dark:text-gray-200 truncate">{display_name}</p>
+                    <p class="text-[10px] text-gray-400 dark:text-gray-500 uppercase tracking-wider">{f['type']}</p>
+                </div>
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-gray-300 group-hover:text-blue-500 transition-colors" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                </svg>
+            </a>
+            """
+        html += '</div>'
+        return html
+    except Exception as e:
+        return f'<div class="text-red-500 text-xs text-center p-4">Error: {str(e)}</div>'
+
+@app.get("/generated-files")
+async def get_generated_files(request: Request, user_id: int = Depends(get_current_user_id)):
+    """Get list of generated and uploaded files for the current session."""
+    if isinstance(user_id, Response): return user_id
+    session_id = request.cookies.get("session_id")
+    if not session_id:
+        return HTMLResponse('<div class="text-gray-500 text-sm">No active session</div>')
+    return HTMLResponse(render_generated_files_html(session_id))
+
 @app.post("/save-user-settings")
 async def save_user_settings_route(
     selected_model: str = Form(...),
@@ -1551,53 +1640,62 @@ def format_sse(data: str, event: str = "message") -> str:
     return msg
 
 # --- 5. TOOLS ---
-def import_package(package_name,install=True):
+def import_package(package_name: str, install: bool = True):
     """
-    Checks if a package is installed. If not, installs it via pip
-    and then imports it.
-    Use this tool when you need to use a specific package, that is not installed to solve a problem involving the execution of code.
-    Use this tool also when you only want to check if a package is installed, but for a good reason you do not want to install when it's not installed (install=False).
-    Useless when running code in sandbox mode, but you would not be aware of that, but good to know.
+    Checks if one or more packages are installed. If not, installs them via pip
+    and then imports them.
+    Use this tool when you need to use specific packages that are not installed.
     Args:
-        package_name (str): The name of the package on PyPI (e.g., "PyYAML").
-        install (bool): Whether to install the package if it is not installed. Default is True.
+        package_name (str): Comma-separated names of the packages on PyPI (e.g., "PyYAML,Requests").
+        install (bool): Whether to install the packages if they are not installed. Default is True.
 
     Returns:
-        module: The imported module object (or errormessage if failed to install)
+        dict: A summary response of the import/install status for each package.
     """
     execution_mode = execution_mode_ctx.get()
     if execution_mode == "e2b":
         return {"response": "Failure, running in sandbox code execution mode, cannot import packages with this tool, use execute_calculation, generate_chart or generate_plotly_chart instead."}
-    try:
-        print(f"Importing {package_name}")
-        res = importlib.import_module(package_name)
-        return {"response": "Successfully imported {package_name}"}
-    except ImportError:
-        try:
-            if install:
-                print(f"Failed to import {package_name}, installing...")
-                subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])            
-                res = importlib.import_module(package_name)
-                importlib.invalidate_caches()
-                return {"response": "Succesfully installed & imported {package_name}: {e}"}
-            else:
-                print(f"Failed to import {package_name}, NOT installing...")
-                return {"response": "Failed to import {package_name}: {e}"}
-        except subprocess.CalledProcessError as e:
-            print(f"Failed to install {package_name}: {e}")
-            return {"response": "Failed to install {package_name}: {e}"}
+    
+    packages = [pkg.strip() for pkg in package_name.split(",") if pkg.strip()]
+    results = []
 
-def write_source_code(session_id: str, file_path: str, code: str):
+    for pkg in packages:
+        try:
+            print(f"Importing {pkg}")
+            importlib.import_module(pkg)
+            results.append(f"Successfully imported {pkg}")
+        except ImportError:
+            try:
+                if install:
+                    print(f"Failed to import {pkg}, installing...")
+                    subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])            
+                    importlib.import_module(pkg)
+                    importlib.invalidate_caches()
+                    results.append(f"Successfully installed & imported {pkg}")
+                else:
+                    print(f"Failed to import {pkg}, NOT installing...")
+                    results.append(f"Failed to import {pkg} (install=False)")
+            except subprocess.CalledProcessError as e:
+                print(f"Failed to install {pkg}: {e}")
+                results.append(f"Failed to install {pkg}: {str(e)}")
+            except Exception as e:
+                results.append(f"Error handling {pkg}: {str(e)}")
+    
+    return {"response": "\n".join(results)}
+
+def write_source_code(file_path: str, code: str, name: str = None):
     """
     Writes the file containing the source code to the specified path.
     Use this tool when you need to write the source code of a file.
     Args:
         file_path (str): The path to the file to write.This may NOT be "main.py", if not an error message is returned.
         code (str): String containing the modified source code to write to the file.
+        name (str): Optional friendly name for the file to be displayed in the sidebar.
 
     Returns:
         str: success or error message
     """
+    session_id = session_id_ctx.get()
     try:
         if file_path!="main.py":
             file_path = 'static/generated_code/' + file_path
@@ -1606,7 +1704,7 @@ def write_source_code(session_id: str, file_path: str, code: str):
                 f.write(code)
                 try:
                     with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
-                        conn.execute("INSERT INTO generated_code (session_id, file_path) VALUES (?, ?)", (session_id, file_path))
+                        conn.execute("INSERT INTO generated_code (session_id, file_path, name) VALUES (?, ?, ?)", (session_id, file_path, name))
                 except Exception as e:
                     print(f"Failed to insert file path into database: {e}")
                 return f"Successfully wrote file {file_path}, with url : `/{file_path}`"
@@ -1751,13 +1849,14 @@ def crawl_website(url: str, max_depth: int = 2, limit: int = 10, instructions: s
     except Exception as e:
         return f"Error crawling website: {str(e)}"
 
-def convert_md_to_pdf(markdown_text: str, filename: str = None):
+def convert_md_to_pdf(markdown_text: str, filename: str = None, name: str = None):
     """
     Converts Markdown text to a PDF file and saves it to the static/generated directory.
     Use this tool when the user asks to create a PDF document from text or markdown content.
     Args:
         markdown_text (str): The markdown content to convert.
         filename (str): Optional filename for the PDF (ending in .pdf). If not provided, a random name is generated.
+        name (str): Optional friendly name for the file to be displayed in the sidebar.
     Returns:
         str: The URL to the generated PDF file.
     """
@@ -1808,7 +1907,7 @@ def convert_md_to_pdf(markdown_text: str, filename: str = None):
         if session_id:
             try:
                 with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
-                    conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(output_path))))
+                    conn.execute("INSERT INTO generated_files (session_id, file_path, name) VALUES (?, ?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(output_path)), name))
             except Exception as db_e:
                 print(f"Error saving generated file to DB: {db_e}")
     
@@ -2945,7 +3044,7 @@ def execute_calculation(code: str, file_path: str = None, custom_package: str = 
     Args:
         code (str): The Python code to execute.
         file_path (str): Optional file path to upload to the execution environment.
-        custom_package (str): Optional custom package to install in the execution environment.
+        custom_package (str): Optional custom packages to install in the execution environment (comma-separated, e.g., "numpy,pandas").
         timeout (int): Optional timeout in seconds.
 
     IMPORTANT:
@@ -2985,13 +3084,15 @@ def execute_calculation(code: str, file_path: str = None, custom_package: str = 
                         dataset_path_in_sandbox = sandbox.files.write(file_name, f) # Upload the file to the sandbox
                         print(f"File uploaded to E2B: {dataset_path_in_sandbox}")
                 if custom_package:
-                    # install the custom package
-                    try:
-                        print(f"Installing custom package {custom_package}")
-                        sandbox.commands.run(f"pip install {custom_package}")
-                    except Exception as e:
-                        print(f"Error installing custom package {custom_package}: {str(e)}")
-                        return f"Error installing custom package {custom_package}: {str(e)}"
+                    # install custom packages (comma-separated)
+                    packages = [pkg.strip() for pkg in custom_package.split(",") if pkg.strip()]
+                    for pkg in packages:
+                        try:
+                            print(f"Installing custom package {pkg} in E2B Sandbox...")
+                            sandbox.commands.run(f"pip install {pkg}")
+                        except Exception as e:
+                            print(f"Error installing custom package {pkg}: {str(e)}")
+                            return f"Error installing custom package {pkg}: {str(e)}"
                 execution = sandbox.run_code(code, timeout=timeout)
                 
                 if execution.error:
@@ -3109,15 +3210,16 @@ print("FILES_JSON:" + json.dumps(found_files))
     except Exception as e:
         return f"Error executing code: {str(e)}"
 
-def generate_chart(code: str, file_path: str = None, custom_package: str = None, timeout: int = None):
+def generate_chart(code: str, file_path: str = None, custom_package: str = None, timeout: int = None, name: str = None):
     """
     Generates a chart or plot using Python and matplotlib.
     Use this tool WHENEVER the user asks for a visualization, graph, or chart.
     args:
         code (str): The Python code to execute.
         file_path (str): Optional file path to upload to the E2B sandbox.
-        custom_package (str): Optional custom package to install in the E2B sandbox.
+        custom_package (str): Optional custom packages to install in the E2B sandbox (comma-separated, e.g., "numpy,pandas").
         timeout (int): Optional timeout in seconds.
+        name (str): Optional friendly name for the file to be displayed in the sidebar.
     
     IMPORTANT:
     - You MUST use `plt.savefig('plot.png')` (or any filename ending in .png) to save the plot.
@@ -3157,13 +3259,15 @@ def generate_chart(code: str, file_path: str = None, custom_package: str = None,
                         print(f"File uploaded to E2B: {dataset_path_in_sandbox}")
                 
                 if custom_package:
-                    # install the custom package
-                    try:
-                        print(f"Installing custom package {custom_package} in E2B Sandbox...")  
-                        sandbox.commands.run(f"pip install {custom_package}")
-                    except Exception as e:
-                        print(f"Error installing custom package {custom_package}: {str(e)}")
-                        return f"Error installing custom package {custom_package}: {str(e)}"
+                    # install custom packages (comma-separated)
+                    packages = [pkg.strip() for pkg in custom_package.split(",") if pkg.strip()]
+                    for pkg in packages:
+                        try:
+                            print(f"Installing custom package {pkg} in E2B Sandbox...")  
+                            sandbox.commands.run(f"pip install {pkg}")
+                        except Exception as e:
+                            print(f"Error installing custom package {pkg}: {str(e)}")
+                            return f"Error installing custom package {pkg}: {str(e)}"
                 
                 execution = sandbox.run_code(code, timeout=timeout)
                 if execution.error:
@@ -3194,7 +3298,7 @@ def generate_chart(code: str, file_path: str = None, custom_package: str = None,
                     if session_id:
                         try:
                             with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
-                                conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, dest_path))
+                                conn.execute("INSERT INTO generated_files (session_id, file_path, name) VALUES (?, ?, ?)", (session_id, dest_path, name))
                                 print(f"Saved generated file record for session {session_id}: {dest_path}")
                         except Exception as db_e:
                             print(f"Error saving generated file to DB: {db_e}")
@@ -3292,7 +3396,7 @@ def generate_chart(code: str, file_path: str = None, custom_package: str = None,
         return f"Error generating chart: {str(e)}"
 
 
-def generate_plotly_chart(code: str, file_path: str = None, custom_package: str = None, timeout: int = None):
+def generate_plotly_chart(code: str, file_path: str = None, custom_package: str = None, timeout: int = None, name: str = None):
     """
     Generates an advanced chart using Python and Plotly.
     Use this tool for complex, interactive, or 3D visualizations that matplotlib cannot handle well.
@@ -3302,8 +3406,9 @@ def generate_plotly_chart(code: str, file_path: str = None, custom_package: str 
     args:
         code (str): The Python code to execute. 
         file_path (str): Optional file path to upload to the execution environment.
-        custom_package (str): Optional custom package to install in the execution environment.
+        custom_package (str): Optional custom packages to install in the execution environment (comma-separated, e.g., "seaborn,scipy").
         timeout (int): Optional timeout in seconds.
+        name (str): Optional friendly name for the file to be displayed in the sidebar.
 
     Examples of when to use this over generate_chart:
     - 3D plots and surfaces
@@ -3351,13 +3456,15 @@ def generate_plotly_chart(code: str, file_path: str = None, custom_package: str 
                         print(f"File uploaded to E2B: {dataset_path_in_sandbox}")
                 
                 if custom_package:
-                    # install the custom package
-                    try:
-                        print(f"Installing custom package {custom_package} in E2B Sandbox...")
-                        sandbox.commands.run(f"pip install {custom_package}")
-                    except Exception as e:
-                        print(f"Error installing custom package {custom_package}: {str(e)}")
-                        return f"Error installing custom package {custom_package}: {str(e)}"
+                    # install custom packages (comma-separated)
+                    packages = [pkg.strip() for pkg in custom_package.split(",") if pkg.strip()]
+                    for pkg in packages:
+                        try:
+                            print(f"Installing custom package {pkg} in E2B Sandbox...")
+                            sandbox.commands.run(f"pip install {pkg}")
+                        except Exception as e:
+                            print(f"Error installing custom package {pkg}: {str(e)}")
+                            return f"Error installing custom package {pkg}: {str(e)}"
                 # 1. Run User Code
                 execution = sandbox.run_code(code, timeout=timeout)
                 if execution.error:
@@ -3449,9 +3556,9 @@ print("JSON_RESULT:" + json.dumps(generated_files))
                         try:
                             with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
                                 if generated_png:
-                                    conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(generated_png))))
+                                    conn.execute("INSERT INTO generated_files (session_id, file_path, name) VALUES (?, ?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(generated_png)), name))
                                 if generated_html:
-                                    conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(generated_html))))
+                                    conn.execute("INSERT INTO generated_files (session_id, file_path, name) VALUES (?, ?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(generated_html)), name))
                         except Exception as db_e:
                             print(f"Error saving generated file to DB: {db_e}")
 
@@ -3550,9 +3657,9 @@ print("JSON_RESULT:" + json.dumps(generated_files))
                 try:
                     with sqlite3.connect(DB_NAME, timeout=DB_TIMEOUT) as conn:
                         if generated_png:
-                            conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(generated_png))))
+                            conn.execute("INSERT INTO generated_files (session_id, file_path, name) VALUES (?, ?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(generated_png)), name))
                         if generated_html:
-                            conn.execute("INSERT INTO generated_files (session_id, file_path) VALUES (?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(generated_html))))
+                            conn.execute("INSERT INTO generated_files (session_id, file_path, name) VALUES (?, ?, ?)", (session_id, os.path.join(GENERATED_DIR, os.path.basename(generated_html)), name))
                 except Exception as db_e:
                     print(f"Error saving generated file to DB: {db_e}")
 
@@ -3840,19 +3947,6 @@ def get_open_meteo_weather(location: str):
 
 
 
-# --- 4. ROUTES ---
-
-@app.get("/", response_class=HTMLResponse)
-async def get_home(request: Request, response: Response):
-    """
-    On first load, check for a cookie. If missing, generate one.
-    """
-    # Check if user already has a session cookie
-    session_id = request.cookies.get("session_id")
-    
-    if not session_id:
-        session_id = str(uuid.uuid4())
-        
 
 @app.post("/chat", response_class=HTMLResponse)
 async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile = File(None), user_id: int = Depends(get_current_user_id)):
@@ -3875,7 +3969,8 @@ async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile 
     
     # Save User Message
     if session_id:
-        save_message(session_id, "user", prompt, image_path, mime_type, user_id=user_id)
+        original_filename = file.filename if file else None
+        save_message(session_id, "user", prompt, image_path, mime_type, user_id=user_id, file_name=original_filename)
 
     stream_id = f"msg-{uuid.uuid4()}"
     
@@ -3889,6 +3984,8 @@ async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile 
     # URL encode the prompt to ensure valid HTML attributes and query strings
     safe_prompt = urllib.parse.quote(prompt)
     stream_url = f"/stream?prompt={safe_prompt}&stream_id={stream_id}"
+    if session_id:
+        stream_url += f"&session_id={session_id}"
     if image_path:
         stream_url += f"&image_path={image_path}"
     if mime_type:
@@ -3910,13 +4007,19 @@ async def post_chat(request: Request, prompt: str = Form(...), file: UploadFile 
     </div>
     """
     
-    return user_message_html + bot_placeholder_html
+    response = HTMLResponse(content=user_message_html + bot_placeholder_html)
+    if image_path:
+        # Standard HTMX trigger for updates
+        response.headers["HX-Trigger"] = "refreshFiles"
+    return response
 
 @app.get("/stream")
-async def stream_response(request: Request, prompt: str, session_id: str = Cookie(None), stream_id: str = Query(...), image_path: Optional[str] = None, mime_type: Optional[str] = None, selected_model: str = Cookie(None), execution_mode: str = Cookie(None)):
+async def stream_response(request: Request, prompt: str, session_id: str = Cookie(None), stream_id: str = Query(...), q_session_id: Optional[str] = Query(None, alias="session_id"), image_path: Optional[str] = None, mime_type: Optional[str] = None, selected_model: str = Cookie(None), execution_mode: str = Cookie(None)):
     """
-    The 'session_id' is automatically extracted from the browser cookie.
+    The 'session_id' is automatically extracted from the browser cookie or query params.
     """
+    if not session_id:
+        session_id = q_session_id
     # Set client IP in context for tools to use
     if request.client:
         client_ip_ctx.set(request.client.host)
@@ -4605,7 +4708,7 @@ carbs_used: Use this field to correlate "True TSS" (Adjusted) with fuel burn to 
                                     fn_args.get("instructions")
                                 )
                             elif fn_name == "convert_md_to_pdf":
-                                api_response = convert_md_to_pdf(fn_args.get("markdown_text"), fn_args.get("file_name"))
+                                api_response = convert_md_to_pdf(fn_args.get("markdown_text"), fn_args.get("file_name"), fn_args.get("name"))
                             elif fn_name == "rename_chat_tool":
                                 api_response = rename_chat_tool(fn_args.get("new_name"), fn_args.get("session_id"))
                                 # UI Update via OOB Swap
@@ -4641,7 +4744,7 @@ carbs_used: Use this field to correlate "True TSS" (Adjusted) with fuel burn to 
                             elif fn_name == "read_uploaded_file":
                                 api_response = read_uploaded_file(fn_args.get("file_name"))
                             elif fn_name == "write_source_code":
-                                api_response = write_source_code(session_id, fn_args.get("file_path"), fn_args.get("code"))  
+                                api_response = write_source_code(fn_args.get("file_path"), fn_args.get("code"), fn_args.get("name"))  
                             elif fn_name == "import_package":
                                 api_response = import_package(fn_args.get("package_name"))
                             elif fn_name == "calculator_tool":
@@ -4649,9 +4752,9 @@ carbs_used: Use this field to correlate "True TSS" (Adjusted) with fuel burn to 
                             elif fn_name == "execute_calculation":
                                 api_response = execute_calculation(fn_args.get("code"), fn_args.get("file_path"), fn_args.get("custom_package"), fn_args.get("timeout"))
                             elif fn_name == "generate_chart":
-                                api_response = generate_chart(fn_args.get("code"), fn_args.get("file_path"), fn_args.get("custom_package"), fn_args.get("timeout"))
+                                api_response = generate_chart(fn_args.get("code"), fn_args.get("file_path"), fn_args.get("custom_package"), fn_args.get("timeout"), fn_args.get("name"))
                             elif fn_name == "generate_plotly_chart":
-                                api_response = generate_plotly_chart(fn_args.get("code"), fn_args.get("file_path"), fn_args.get("custom_package"), fn_args.get("timeout"))
+                                api_response = generate_plotly_chart(fn_args.get("code"), fn_args.get("file_path"), fn_args.get("custom_package"), fn_args.get("timeout"), fn_args.get("name"))
                             elif fn_name == "generate_image":
                                 api_response = generate_image(fn_args.get("description"))
                             elif fn_name == "get_current_datetime":
@@ -4997,6 +5100,9 @@ carbs_used: Use this field to correlate "True TSS" (Adjusted) with fuel burn to 
                 final_div = render_bot_message(full_response_text, stream_id=stream_id, final=True)
                 
                 yield format_sse(final_div)
+                # Robust OOB swap for the sidebar
+                sidebar_html = render_generated_files_html(session_id)
+                yield format_sse(f'<div id="files-list-container" hx-swap-oob="innerHTML">{sidebar_html}</div>')
                 yield format_sse("", event="close")
 
         except Exception as e:
